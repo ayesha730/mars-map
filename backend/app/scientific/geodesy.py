@@ -2,11 +2,23 @@ import math
 from typing import Tuple
 from app.core.config import MARS_IAU2015_SPHERE_RADIUS_M
 
-def normalize_longitude(lon: float, wrap_to_360: bool = True) -> float:
+def normalize_longitude(lon: float, wrap_to_360: bool = False) -> float:
     """
-    Normalizes longitude to [0, 360) or [-180, 180].
-    Default: Positive-East [0, 360).
+    Normalizes longitude to the confirmed Mars convention [-180, 180] (default)
+    or legacy [0, 360).
+
+    Default: Positive-East [-180, 180].
+    Legacy mode [0, 360) must be explicitly requested with wrap_to_360=True.
+
+    Boundary behavior:
+    - In [-180, 180], both -180 and +180 map to the canonical positive-east
+      antimeridian representation (+180.0).
+
+    Rejects non-finite values (NaN, infinity) by raising ValueError.
     """
+    if not isinstance(lon, (int, float)) or not math.isfinite(lon):
+        raise ValueError(f"Longitude must be a finite number, got {lon}")
+
     lon = lon % 360
     if not wrap_to_360 and lon > 180:
         lon -= 360
@@ -18,15 +30,33 @@ def validate_coordinates(
     body: str = "Mars",
     lat_type: str = "Planetocentric",
     lon_dir: str = "Positive-East",
-    lon_domain: str = "[0, 360)",
+    lon_domain: str = "[-180, 180]",
     angular_unit: str = "Degrees"
 ) -> bool:
     """
     Validates Mars coordinate constraints.
+    - Coordinates must be finite numbers (rejects NaN and infinity).
     - Latitude must be in [-90, 90].
+    - Longitude must be in [-180, 180] by default (Positive-East).
+      If legacy [0, 360) is explicitly requested, validates against [0, 360).
+    Does not silently normalize invalid coordinates.
     """
-    if not -90 <= lat <= 90:
+    if not isinstance(lat, (int, float)) or not math.isfinite(lat):
+        raise ValueError(f"Latitude must be a finite number, got {lat}")
+    if not isinstance(lon, (int, float)) or not math.isfinite(lon):
+        raise ValueError(f"Longitude must be a finite number, got {lon}")
+
+    if not -90.0 <= lat <= 90.0:
         raise ValueError(f"Latitude {lat} out of range [-90, 90] for {body}")
+
+    if lon_domain in ("[0, 360)", "[0, 360]"):
+        valid_lon = (0.0 <= lon < 360.0) if lon_domain == "[0, 360)" else (0.0 <= lon <= 360.0)
+        if not valid_lon:
+            raise ValueError(f"Longitude {lon} out of range {lon_domain} for {body}")
+    else:
+        if not -180.0 <= lon <= 180.0:
+            raise ValueError(f"Longitude {lon} out of range [-180, 180] for {body}")
+
     return True
 
 def haversine_distance(
