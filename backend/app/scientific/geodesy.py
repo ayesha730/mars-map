@@ -14,8 +14,10 @@ def normalize_longitude(lon: float, wrap_to_360: bool = False) -> float:
     - In [-180, 180], both -180 and +180 map to the canonical positive-east
       antimeridian representation (+180.0).
 
-    Rejects non-finite values (NaN, infinity) by raising ValueError.
+    Rejects non-finite values (NaN, infinity) and booleans by raising ValueError.
     """
+    if isinstance(lon, bool):
+        raise ValueError(f"Longitude cannot be a boolean value, got {lon}")
     if not isinstance(lon, (int, float)) or not math.isfinite(lon):
         raise ValueError(f"Longitude must be a finite number, got {lon}")
 
@@ -35,27 +37,34 @@ def validate_coordinates(
 ) -> bool:
     """
     Validates Mars coordinate constraints.
-    - Coordinates must be finite numbers (rejects NaN and infinity).
+    - Coordinates must be finite numbers (rejects Booleans, NaN, and infinity).
     - Latitude must be in [-90, 90].
     - Longitude must be in [-180, 180] by default (Positive-East).
       If legacy [0, 360) is explicitly requested, validates against [0, 360).
+    - Rejects unsupported longitude domains.
     Does not silently normalize invalid coordinates.
     """
+    if isinstance(lat, bool):
+        raise ValueError(f"Latitude cannot be a boolean value, got {lat}")
     if not isinstance(lat, (int, float)) or not math.isfinite(lat):
         raise ValueError(f"Latitude must be a finite number, got {lat}")
+
+    if isinstance(lon, bool):
+        raise ValueError(f"Longitude cannot be a boolean value, got {lon}")
     if not isinstance(lon, (int, float)) or not math.isfinite(lon):
         raise ValueError(f"Longitude must be a finite number, got {lon}")
 
     if not -90.0 <= lat <= 90.0:
         raise ValueError(f"Latitude {lat} out of range [-90, 90] for {body}")
 
-    if lon_domain in ("[0, 360)", "[0, 360]"):
-        valid_lon = (0.0 <= lon < 360.0) if lon_domain == "[0, 360)" else (0.0 <= lon <= 360.0)
-        if not valid_lon:
-            raise ValueError(f"Longitude {lon} out of range {lon_domain} for {body}")
-    else:
-        if not -180.0 <= lon <= 180.0:
+    if lon_domain == "[0, 360)":
+        if not (0.0 <= lon < 360.0):
+            raise ValueError(f"Longitude {lon} out of range [0, 360) for {body}")
+    elif lon_domain in ("[-180, 180]", "-180_to_180"):
+        if not (-180.0 <= lon <= 180.0):
             raise ValueError(f"Longitude {lon} out of range [-180, 180] for {body}")
+    else:
+        raise ValueError(f"Unsupported longitude domain: {lon_domain}")
 
     return True
 

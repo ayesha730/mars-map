@@ -25,13 +25,42 @@ def test_longitude_boundary_validation():
         validate_coordinates(0, 360)
 
 def test_legacy_longitude_domain_validation():
-    # Explicit legacy [0, 360) domain validation
+    # Explicit legacy [0, 360) half-open domain validation
     assert validate_coordinates(0, 0, lon_domain="[0, 360)") is True
+    assert validate_coordinates(0, 180, lon_domain="[0, 360)") is True
     assert validate_coordinates(0, 359.9, lon_domain="[0, 360)") is True
     with pytest.raises(ValueError, match="Longitude"):
         validate_coordinates(0, -0.1, lon_domain="[0, 360)")
     with pytest.raises(ValueError, match="Longitude"):
         validate_coordinates(0, 360, lon_domain="[0, 360)")
+    with pytest.raises(ValueError, match="Longitude"):
+        validate_coordinates(0, 360.1, lon_domain="[0, 360)")
+
+def test_unsupported_longitude_domain_rejected():
+    # Obsolete [0, 360] inclusive domain must be rejected
+    with pytest.raises(ValueError, match="Unsupported longitude domain"):
+        validate_coordinates(0, 180, lon_domain="[0, 360]")
+    with pytest.raises(ValueError, match="Unsupported longitude domain"):
+        validate_coordinates(0, 0, lon_domain="0_to_360")
+    with pytest.raises(ValueError, match="Unsupported longitude domain"):
+        validate_coordinates(0, 0, lon_domain="invalid_domain")
+
+def test_boolean_coordinates_rejected():
+    # Reject Boolean coordinates for latitude and longitude in validate_coordinates
+    with pytest.raises(ValueError, match="Latitude"):
+        validate_coordinates(True, 0)
+    with pytest.raises(ValueError, match="Latitude"):
+        validate_coordinates(False, 0)
+    with pytest.raises(ValueError, match="Longitude"):
+        validate_coordinates(0, True)
+    with pytest.raises(ValueError, match="Longitude"):
+        validate_coordinates(0, False)
+
+    # normalize_longitude must also reject Boolean longitude
+    with pytest.raises(ValueError, match="Longitude"):
+        normalize_longitude(True)
+    with pytest.raises(ValueError, match="Longitude"):
+        normalize_longitude(False)
 
 def test_non_finite_coordinates_rejected():
     # Reject NaN and +/- infinity for both latitude and longitude
