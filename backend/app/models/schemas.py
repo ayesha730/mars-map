@@ -16,11 +16,13 @@ Display coordinate space (arespath_display_v1):
 
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.config import VERSION, PROJECT_NAME
+from app.scientific.dem.models import CoverageStatus
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +82,13 @@ class MarsPoint(BaseModel):
                             description="Planetocentric latitude in degrees [-90, 90]")
     longitude: float = Field(..., ge=-180.0, le=180.0,
                              description="Positive-east longitude in degrees [-180, 180]")
+
+    @field_validator("latitude", "longitude", mode="before")
+    @classmethod
+    def reject_boolean_coordinates(cls, v: object, info) -> object:
+        if isinstance(v, bool):
+            raise ValueError(f"{info.field_name} cannot be a boolean value, got {v!r}")
+        return v
 
 
 class RouteRequest(BaseModel):
@@ -451,3 +460,142 @@ class RegionMetadata(BaseModel):
         description="True only when verified terrain data and routing service are operational")
     routing_unavailable_reason: Optional[str] = Field(None,
         description="Machine-readable reason code when routing_available is False")
+
+
+# ---------------------------------------------------------------------------
+# Elevation sampling
+# ---------------------------------------------------------------------------
+
+class ElevationSampleRequest(BaseModel):
+    """
+    Request body for POST /api/v1/elevation/sample.
+
+    Coordinates must be in the confirmed AresPath Mars convention:
+      planetocentric latitude, positive-east longitude, degrees, [-180, 180].
+    """
+    region_id: str = Field(
+        ...,
+        min_length=1,
+        description="Identifier for the Mars surface region (e.g. 'jezero_crater')"
+    )
+    latitude: float = Field(
+        ...,
+        ge=-90.0,
+        le=90.0,
+        description="Planetocentric latitude in degrees [-90.0, 90.0]"
+    )
+    longitude: float = Field(
+        ...,
+        ge=-180.0,
+        le=180.0,
+        description="Positive-east longitude in degrees [-180.0, 180.0]"
+    )
+    coordinate_reference: MarsCoordinateReference = Field(
+        default_factory=MarsCoordinateReference,
+        description="Must match the confirmed AresPath Mars convention"
+    )
+
+    @field_validator("latitude", "longitude", mode="before")
+    @classmethod
+    def reject_boolean_coordinates(cls, v: object, info) -> object:
+        if isinstance(v, bool):
+            raise ValueError(f"{info.field_name} cannot be a boolean value, got {v!r}")
+        return v
+
+    @field_validator("coordinate_reference")
+    @classmethod
+    def validate_crs(cls, v: MarsCoordinateReference) -> MarsCoordinateReference:
+        if v.body != "Mars":
+            raise ValueError("coordinate_reference.body must be 'Mars'")
+        if v.latitude_type != "planetocentric":
+            raise ValueError("coordinate_reference.latitude_type must be 'planetocentric'")
+        if v.longitude_direction != "positive_east":
+            raise ValueError("coordinate_reference.longitude_direction must be 'positive_east'")
+        if v.longitude_domain != "-180_to_180":
+            raise ValueError("coordinate_reference.longitude_domain must be '-180_to_180'")
+        return v
+
+
+class ElevationSampleResponse(BaseModel):
+    """
+    Response model for POST /api/v1/elevation/sample.
+
+    Directly reflects the outcome of nearest-neighbor DEM elevation sampling
+    and CoverageStatus classification. Internal coordinate pipeline details
+    (projected coordinates, continuous pixel coordinates, raster indices)
+    and bilinear interpolation stubs are strictly not exposed.
+    """
+    region_id: str = Field(
+        ...,
+        description="Region the query was evaluated against"
+    )
+    latitude: float = Field(
+        ...,
+        description="Query planetocentric latitude in degrees"
+    )
+    longitude: float = Field(
+        ...,
+        description="Query positive-east longitude in degrees"
+    )
+    status: CoverageStatus = Field(
+        ...,
+        description="Coverage classification: 'valid', 'out_of_bounds', 'nodata_collar', or 'elevation_unavailable'"
+    )
+    geometric_coverage: bool = Field(
+        ...,
+        description="True if coordinates lie inside half-open raster bounds [0, width) x [0, height)"
+    )
+    elevation_valid: bool = Field(
+        ...,
+        description="True if containing cell contains a finite, valid non-NoData value"
+    )
+    elevation_m: Optional[float] = Field(
+        None,
+        description="Nominal elevation value in metres as represented by the source DEM. The vertical datum is not explicitly identified in the source GeoTIFF metadata."
+    )
+    sampling_method: Literal["nearest_neighbor"] = Field(
+        "nearest_neighbor",
+        description="Sampling method used; nearest-neighbor (containing-cell) only in Milestone 2"
+    )
+    coordinate_reference: MarsCoordinateReference = Field(
+        default_factory=MarsCoordinateReference,
+        description="Planetary coordinate reference frame of input and evaluation"
+    )
+    message: Optional[str] = Field(
+        None,
+        description="Diagnostic details explaining why elevation is unavailable or invalid"
+    )
+
+    @model_validator(mode="after")
+    def validate_elevation_and_status(self) -> ElevationSampleResponse:
+        if self.elevation_valid:
+            if self.elevation_m is None:
+                raise ValueError("elevation_valid=True requires a non-null elevation_m")
+            if not math.isfinite(self.elevation_m):
+                raise ValueError("elevation_valid=True requires a finite elevation_m")
+        else:
+            if self.elevation_m is not None:
+                raise ValueError("elevation_valid=False requires elevation_m=None")
+
+        if self.status == CoverageStatus.VALID:
+            if not self.geometric_coverage:
+                raise ValueError("CoverageStatus.VALID requires geometric_coverage=True")
+            if not self.elevation_valid:
+                raise ValueError("CoverageStatus.VALID requires elevation_valid=True")
+        elif self.status == CoverageStatus.OUT_OF_BOUNDS:
+            if self.geometric_coverage:
+                raise ValueError("CoverageStatus.OUT_OF_BOUNDS requires geometric_coverage=False")
+            if self.elevation_valid:
+                raise ValueError("CoverageStatus.OUT_OF_BOUNDS requires elevation_valid=False")
+        elif self.status == CoverageStatus.NODATA_COLLAR:
+            if not self.geometric_coverage:
+                raise ValueError("CoverageStatus.NODATA_COLLAR requires geometric_coverage=True")
+            if self.elevation_valid:
+                raise ValueError("CoverageStatus.NODATA_COLLAR requires elevation_valid=False")
+        elif self.status == CoverageStatus.ELEVATION_UNAVAILABLE:
+            if not self.geometric_coverage:
+                raise ValueError("CoverageStatus.ELEVATION_UNAVAILABLE requires geometric_coverage=True")
+            if self.elevation_valid:
+                raise ValueError("CoverageStatus.ELEVATION_UNAVAILABLE requires elevation_valid=False")
+
+        return self
