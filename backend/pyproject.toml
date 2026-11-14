@@ -6,6 +6,7 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "pydantic",
+    "rasterio>=1.4.0",
 ]
 
 [tool.pytest.ini_options]
