@@ -1,0 +1,14 @@
+[project]
+name = "arespath-backend"
+version = "0.1.0"
+description = "NASA Space Apps 2026 AresPath Backend"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["app"]
+asyncio_mode = "auto"
