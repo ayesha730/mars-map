@@ -75,28 +75,28 @@ async def test_layers_response_is_list():
 
 
 # ---------------------------------------------------------------------------
-# 3. Empty verified-layer catalogue (current state — no DEM integrated)
+# 3. Empty verified-layer catalogue (unintegrated region — gale_crater)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_layers_verified_unavailable_is_false():
-    """No verified terrain layers are registered; flag must be False."""
-    _, body = await get_layers("jezero_crater")
+    """No verified terrain layers are registered for gale; flag must be False."""
+    _, body = await get_layers("gale_crater")
     assert body["verified_layers_available"] is False
 
 
 @pytest.mark.asyncio
 async def test_layers_catalogue_is_empty():
-    """No layers registered yet — list must be empty."""
-    _, body = await get_layers("jezero_crater")
+    """No layers registered for gale yet — list must be empty."""
+    _, body = await get_layers("gale_crater")
     assert body["layers"] == []
     assert body["total_count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_layers_notice_present_when_empty():
-    """When no verified layers, a notice must explain the absence."""
-    _, body = await get_layers("jezero_crater")
+    """When no verified layers for gale, a notice must explain the absence."""
+    _, body = await get_layers("gale_crater")
     assert body["notice"] is not None
     assert isinstance(body["notice"], str)
     assert len(body["notice"]) > 0
@@ -104,8 +104,8 @@ async def test_layers_notice_present_when_empty():
 
 @pytest.mark.asyncio
 async def test_layers_notice_does_not_fabricate_data():
-    """The notice must not claim layers exist or invent dataset names."""
-    _, body = await get_layers("jezero_crater")
+    """The notice for unpopulated region must state data is not available."""
+    _, body = await get_layers("gale_crater")
     notice = body["notice"].lower()
     # Must say something about data not being available yet
     assert any(word in notice for word in ["not", "no verified", "has not"])
@@ -115,13 +115,43 @@ async def test_layers_notice_does_not_fabricate_data():
 async def test_layers_no_fabricated_entries():
     """The catalogue must never contain synthetic/invented layer entries."""
     _, body = await get_layers("jezero_crater")
-    # Every entry must be genuinely registered; with empty catalogue this
-    # simply asserts the list is empty — protecting against future accidental
-    # addition of fake entries.
     for layer in body["layers"]:
         assert "layer_id" in layer
-        assert "is_verified" in layer
-        assert "is_synthetic" in layer
+        assert layer["is_verified"] is True
+        assert layer["is_synthetic"] is False
+
+
+# ---------------------------------------------------------------------------
+# 3b. Populated verified-layer catalogue (integrated region — jezero_crater)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_layers_jezero_verified_available_is_true():
+    """Jezero crater has verified DEM and imagery layers integrated."""
+    _, body = await get_layers("jezero_crater")
+    assert body["verified_layers_available"] is True
+    assert body["total_count"] == 2
+    assert len(body["layers"]) == 2
+    assert body["notice"] is None
+
+
+@pytest.mark.asyncio
+async def test_layers_jezero_alias_returns_same_catalogue():
+    """region_id='jezero' alias resolves to 'jezero_crater'."""
+    code, body = await get_layers("jezero")
+    assert code == 200
+    assert body["region_id"] == "jezero_crater"
+    assert body["verified_layers_available"] is True
+    assert body["total_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_layers_jezero_contains_elevation_and_imagery():
+    """Jezero catalogue exposes both DEM (elevation) and orthoimage layers."""
+    _, body = await get_layers("jezero_crater")
+    layer_types = {lyr["layer_type"] for lyr in body["layers"]}
+    assert "dem" in layer_types
+    assert "orthoimage" in layer_types
 
 
 # ---------------------------------------------------------------------------

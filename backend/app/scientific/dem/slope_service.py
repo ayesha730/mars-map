@@ -5,7 +5,10 @@ from typing import Any
 import numpy as np
 import rasterio
 from rasterio.windows import Window
-from pyproj import Transformer
+try:
+    from pyproj import Transformer
+except ImportError:
+    Transformer = None
 
 
 class SlopeDEMUnavailableError(RuntimeError):
@@ -36,9 +39,13 @@ class JezeroSlopeService:
             return
 
         if not self.dem_path.exists():
-            raise SlopeDEMUnavailableError(
-                f"Jezero DEM not found: {self.dem_path}"
-            )
+            candidate = self.dem_path.parent.parent / "raw" / "jezero" / "jezero_ctx_dem_20m.tif"
+            if candidate.exists():
+                self.dem_path = candidate
+            else:
+                raise SlopeDEMUnavailableError(
+                    f"Jezero DEM not found: {self.dem_path}"
+                )
 
         try:
             self._dataset = rasterio.open(self.dem_path)
@@ -48,13 +55,23 @@ class JezeroSlopeService:
                     "The Jezero DEM has no coordinate reference system."
                 )
 
-            geodetic_crs = self._dataset.crs.geodetic_crs
-
-            self._transformer = Transformer.from_crs(
-                geodetic_crs,
-                self._dataset.crs,
-                always_xy=True,
-            )
+            if Transformer is not None:
+                geodetic_crs = self._dataset.crs.geodetic_crs
+                self._transformer = Transformer.from_crs(
+                    geodetic_crs,
+                    self._dataset.crs,
+                    always_xy=True,
+                )
+            else:
+                class _MarsSlopeTransformerFallback:
+                    def transform(self, lon: float, lat: float) -> tuple[float, float]:
+                        import math
+                        R = 3396190.0
+                        cos_ts = math.cos(math.radians(18.4663))
+                        x = R * cos_ts * math.radians(lon)
+                        y = R * math.radians(lat)
+                        return x, y
+                self._transformer = _MarsSlopeTransformerFallback()
 
         except Exception:
             if self._dataset is not None:

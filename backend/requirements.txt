@@ -1,7 +1,8 @@
 fastapi
 uvicorn[standard]
 pydantic
-pytest
-httpx
 rasterio>=1.4.0
+numpy
+affine
+pillow
 pyproj

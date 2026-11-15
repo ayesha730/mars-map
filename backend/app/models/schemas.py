@@ -61,6 +61,7 @@ class RoutingProfile(str, Enum):
     SAFE = "safe"
     FAST = "fast"
     SCIENCE = "science"
+    DEMONSTRATION = "demonstration"
 
 
 class RouteAlgorithm(str, Enum):
@@ -150,10 +151,12 @@ class RouteGeometry(BaseModel):
 class TerrainSummary(BaseModel):
     min_elevation_m: Optional[float] = Field(None, description="Minimum elevation along route (metres)")
     max_elevation_m: Optional[float] = Field(None, description="Maximum elevation along route (metres)")
-    max_slope_deg: Optional[float] = Field(None, description="Maximum terrain slope along route (degrees)")
-    hazard_count: int = Field(0, description="Number of identified hazard zones crossed")
+    max_slope_deg: Optional[float] = Field(None, description="Maximum terrain slope along route (degrees); None if not evaluated")
+    hazard_count: Optional[int] = Field(None, description="Number of identified hazard zones crossed; None if not evaluated")
     surface_types: List[str] = Field(default_factory=list,
                                      description="Surface material categories encountered")
+    evaluation_status: str = Field(default="measured_elevation_only",
+                                   description="Distinguishes measured, derived, and unevaluated metrics")
 
 
 # ---------------------------------------------------------------------------

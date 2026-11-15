@@ -5,7 +5,14 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-from pyproj import CRS, Transformer
+from rasterio.warp import transform as warp_transform
+try:
+    from pyproj import CRS, Transformer
+    HAS_PYPROJ = True
+except ImportError:
+    HAS_PYPROJ = False
+    CRS = None
+    Transformer = None
 from rasterio.windows import Window
 
 from app.scientific.dem.astar import (
@@ -20,12 +27,20 @@ from app.scientific.dem.cost_grid import build_terrain_cost_grid
 # Configuration
 # ---------------------------------------------------------------------
 
-DEM_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "data"
-    / "jezero"
-    / "jezero_ctx_dem_20m.tif"
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_JEZERO_DEM_CANDIDATES = [
+    PROJECT_ROOT / "data" / "raw" / "jezero" / "jezero_ctx_dem_20m.tif",
+    PROJECT_ROOT / "data" / "jezero" / "jezero_ctx_dem_20m.tif",
+    PROJECT_ROOT / "backend" / "data" / "jezero" / "jezero_ctx_dem_20m.tif",
+]
+
+def _resolve_default_dem_path() -> Path:
+    for candidate in DEFAULT_JEZERO_DEM_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return DEFAULT_JEZERO_DEM_CANDIDATES[0]
+
+DEM_PATH = _resolve_default_dem_path()
 
 MARS_RADIUS_M = 3_396_190.0
 
@@ -115,36 +130,52 @@ class JezeroRoutingService:
     @staticmethod
     def _make_transformer(
         dem_crs_input,
-    ) -> Transformer:
+    ):
         """
         Construct a Mars geographic CRS using the Mars sphere
         and transform into the DEM's native projected CRS.
 
         This avoids passing terrestrial OGC:CRS84 as the source CRS.
         """
+        if HAS_PYPROJ:
+            dem_crs = CRS.from_user_input(dem_crs_input)
 
-        dem_crs = CRS.from_user_input(dem_crs_input)
-
-        mars_geographic_crs = CRS.from_proj4(
-            f"+proj=longlat "
-            f"+a={MARS_RADIUS_M} "
-            f"+b={MARS_RADIUS_M} "
-            f"+no_defs "
-            f"+type=crs"
-        )
-
-        try:
-            return Transformer.from_crs(
-                mars_geographic_crs,
-                dem_crs,
-                always_xy=True,
-                allow_ballpark=True,
+            mars_geographic_crs = CRS.from_proj4(
+                f"+proj=longlat "
+                f"+a={MARS_RADIUS_M} "
+                f"+b={MARS_RADIUS_M} "
+                f"+no_defs "
+                f"+type=crs"
             )
-        except Exception as exc:
-            raise RoutingDataError(
-                "Could not construct a Mars geographic-to-DEM "
-                f"coordinate transformation: {exc}"
-            ) from exc
+
+            try:
+                return Transformer.from_crs(
+                    mars_geographic_crs,
+                    dem_crs,
+                    always_xy=True,
+                    allow_ballpark=True,
+                )
+            except Exception as exc:
+                raise RoutingDataError(
+                    "Could not construct a Mars geographic-to-DEM "
+                    f"coordinate transformation: {exc}"
+                ) from exc
+        else:
+            class _WarpTransformer:
+                def __init__(self, target_crs):
+                    self.target_crs = target_crs
+                    if hasattr(target_crs, "geodetic_crs") and target_crs.geodetic_crs:
+                        self.src_crs = target_crs.geodetic_crs
+                    else:
+                        self.src_crs = rasterio.crs.CRS.from_string(
+                            f"+proj=longlat +a={MARS_RADIUS_M} +b={MARS_RADIUS_M} +no_defs"
+                        )
+
+                def transform(self, lon, lat, errcheck=True):
+                    xs, ys = warp_transform(self.src_crs, self.target_crs, [lon], [lat])
+                    return xs[0], ys[0]
+
+            return _WarpTransformer(dem_crs_input)
 
     # -----------------------------------------------------------------
     # Coordinate conversion

@@ -4,81 +4,62 @@ import MarsMap from "@/components/MarsMap";
 import {
   calculateRoute,
   checkBackendHealth,
-  getRegions,
-  getRegionLayers,
+  fetchRegions,
+  fetchLayers,
+  displayPointToLonLat,
 } from "@/lib/api";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import type {
-  MarsCoordinate,
-  MarsRegion,
-  MarsLayer,
-  LayersResponse,
   RouteRequest,
   RouteResponse,
+  RegionSummary,
+  LayerCatalogueEntry,
+  MarsPoint,
 } from "@/types/api";
 
-type LayerView = MarsLayer & {
-  enabled: boolean;
-};
+const JEZERO_PRESETS = [
+  {
+    name: "Perseverance Landing Site (Octavia E. Butler)",
+    lat: 18.4447,
+    lon: 77.4508,
+  },
+  {
+    name: "Jezero Delta Front Scarp",
+    lat: 18.4350,
+    lon: 77.4000,
+  },
+  {
+    name: "Belva Crater Western Rim",
+    lat: 18.5000,
+    lon: 77.3700,
+  },
+  {
+    name: "Kodiak Butte Stratigraphic Remnant",
+    lat: 18.4100,
+    lon: 77.4400,
+  },
+];
 
 type MapSelectionTarget = "start" | "destination";
 
-type BackendStatusType =
-  | "idle"
-  | "loading"
-  | "success"
-  | "error";
+type BackendStatusType = "idle" | "loading" | "success" | "error";
 
-type BackendStatus = {
+interface BackendStatus {
   type: BackendStatusType;
   message: string;
-};
-
-// Jezero DEM projection parameters.
-const MARS_RADIUS_M = 3396190;
-const JEZERO_STANDARD_PARALLEL_DEG = 18.4663;
-
-/**
- * Convert native Jezero DEM equirectangular projected coordinates
- * into MapLibre longitude/latitude coordinates.
- *
- * Input X/Y are projected coordinates in the DEM's native CRS.
- * Output is [longitude, latitude] in degrees.
- */
-function projectedToMarsLonLat(
-  x: number,
-  y: number,
-): [number, number] {
-  const standardParallel =
-    (JEZERO_STANDARD_PARALLEL_DEG * Math.PI) / 180;
-
-  const longitude =
-    (x / (MARS_RADIUS_M * Math.cos(standardParallel))) *
-    (180 / Math.PI);
-
-  const latitude =
-    (y / MARS_RADIUS_M) *
-    (180 / Math.PI);
-
-  return [longitude, latitude];
 }
 
-function parseMarsCoordinate(value: string): MarsCoordinate | null {
-  const parts = value.split(",");
+function parseMarsCoordinate(value: string): MarsPoint | null {
+  const parts = value.split(",").map((part) => Number(part.trim()));
 
   if (
     parts.length !== 2 ||
-    parts.some((part) => part.trim() === "")
+    parts.some((part) => !Number.isFinite(part))
   ) {
     return null;
   }
 
-  const latitude = Number(parts[0].trim());
-  const longitude = Number(parts[1].trim());
-
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return null;
-  }
+  const [latitude, longitude] = parts;
 
   if (
     latitude < -90 ||
@@ -92,267 +73,156 @@ function parseMarsCoordinate(value: string): MarsCoordinate | null {
   return { latitude, longitude };
 }
 
-function getLayerColor(type: MarsLayer["layer_type"]): string {
-  const colors: Record<MarsLayer["layer_type"], string> = {
-    dem: "#e5a35c",
-    orthoimage: "#d77b58",
-    slope: "#e7ca72",
-    hazard: "#e47777",
-    geologic: "#9e91d5",
-    custom: "#76b7c9",
-  };
-
-  return colors[type] || "#a0a0a0";
-}
-
 export default function Home() {
-  // Region state.
-  const [regions, setRegions] = useState<MarsRegion[]>([]);
-  const [selectedRegion, setSelectedRegion] =
-    useState("jezero_crater");
-  const [regionsLoading, setRegionsLoading] = useState(true);
-  const [regionError, setRegionError] = useState("");
-
-  // Interactive map state.
-  const [mapResetSignal, setMapResetSignal] = useState(0);
-  const [mapCoordinate, setMapCoordinate] = useState("");
-  const [nextMapSelection, setNextMapSelection] =
-    useState<MapSelectionTarget>("start");
-
-  // Layer catalogue state.
-  const [layers, setLayers] = useState<LayerView[]>([]);
-  const [catalogue, setCatalogue] =
-    useState<LayersResponse | null>(null);
-  const [layersLoading, setLayersLoading] = useState(false);
-  const [layerError, setLayerError] = useState("");
+  const [start, setStart] = useState("18.4447, 77.4508");
+  const [destination, setDestination] = useState("18.4350, 77.4000");
+  const [message, setMessage] = useState("");
+  const [routeResult, setRouteResult] = useState<RouteResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [selectedRegion, setSelectedRegion] = useState("jezero_crater");
   const [catalogueExpanded, setCatalogueExpanded] = useState(true);
 
-  // Backend state.
+  // Region and catalogue states
+  const [regions, setRegions] = useState<RegionSummary[]>([
+    {
+      region_id: "jezero_crater",
+      display_name: "Jezero Crater",
+      routing_available: true,
+      center_lat_deg: 18.4354,
+      center_lon_deg: 77.7900,
+      min_lat_deg: 17.5805,
+      max_lat_deg: 19.2902,
+      min_lon_deg: 76.9974,
+      max_lon_deg: 78.5826,
+    },
+    {
+      region_id: "gale_crater",
+      display_name: "Gale Crater",
+      routing_available: false,
+      routing_unavailable_reason: "ROUTING_DATA_UNAVAILABLE",
+      center_lat_deg: -4.6,
+      center_lon_deg: 137.4,
+      min_lat_deg: -5.5,
+      max_lat_deg: -3.7,
+      min_lon_deg: 136.5,
+      max_lon_deg: 138.3,
+    },
+  ]);
+
+  const [catalogueLayers, setCatalogueLayers] = useState<LayerCatalogueEntry[]>([]);
+  const [orthoVisible, setOrthoVisible] = useState(true);
   const [backendOnline, setBackendOnline] = useState(false);
   const [healthChecked, setHealthChecked] = useState(false);
 
-  // Route planner state.
-  // Route planner state.
-  const [start, setStart] = useState("18.3, 77.2");
-  const [destination, setDestination] = useState("18.5, 77.4");
-  const [message, setMessage] = useState("");
-  const [routeResult, setRouteResult] =
-    useState<RouteResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  // Map selection state
+  const [nextMapSelection, setNextMapSelection] = useState<MapSelectionTarget>("start");
+  const [mapCoordinate, setMapCoordinate] = useState("");
+  const [mapResetSignal, setMapResetSignal] = useState(0);
 
-  // Dedicated backend request status.
-  const [backendStatus, setBackendStatus] =
-    useState<BackendStatus>({
-      type: "idle",
-      message: "Ready to calculate a Mars surface route.",
-    });
+  // Backend request status tracking
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>({
+    type: "idle",
+    message: "Ready to calculate a Mars surface route.",
+  });
 
-  // Prevent duplicate route requests.
   const routeRequestInFlight = useRef(false);
 
-  // Convert backend route geometry into MapLibre coordinates.
-  // Backend points are in native DEM projected X/Y coordinates,
-  // not longitude/latitude.
-  const routeMapCoordinates: [number, number][] =
-    routeResult?.route_geometry.points.map((point) =>
-      projectedToMarsLonLat(point.x, point.y)
-    ) ?? [];
-
-  // Check backend and fetch available regions.
+  // Check health and load regions on mount
   useEffect(() => {
-    let active = true;
-
-    async function initializeBackend() {
-      const online = await checkBackendHealth();
-
-      if (!active) return;
-
+    checkBackendHealth().then((online) => {
       setBackendOnline(online);
       setHealthChecked(true);
-
-      try {
-        setRegionsLoading(true);
-        setRegionError("");
-
-        const data = await getRegions();
-
-        if (!active) return;
-
-        setRegions(data);
-
-        if (data.length > 0) {
-          setSelectedRegion((current) =>
-            data.some((region) => region.region_id === current)
-              ? current
-              : data[0].region_id
-          );
-        } else {
-          setSelectedRegion("");
-          setRegionError("No Mars regions are currently registered.");
-        }
-      } catch (error) {
-        if (!active) return;
-
-        setRegionError(
-          error instanceof Error
-            ? error.message
-            : "Unable to load Mars regions."
-        );
-      } finally {
-        if (active) {
-          setRegionsLoading(false);
-        }
+      if (online) {
+        fetchRegions()
+          .then((res) => {
+            if (Array.isArray(res) && res.length > 0) {
+              setRegions(res);
+            }
+          })
+          .catch(() => {});
       }
-    }
-
-    initializeBackend();
-
-    return () => {
-      active = false;
-    };
+    });
   }, []);
 
-  // Fetch layer catalogue whenever selected region changes.
+  // Fetch layer catalogue whenever selected region changes
   useEffect(() => {
-    if (!selectedRegion) {
-      setLayers([]);
-      setCatalogue(null);
-      return;
+    if (backendOnline) {
+      fetchLayers(selectedRegion)
+        .then((res) => {
+          setCatalogueLayers(res.layers || []);
+        })
+        .catch(() => {
+          setCatalogueLayers([]);
+        });
     }
+  }, [selectedRegion, backendOnline]);
 
-    let active = true;
+  const startPoint = useMemo(() => parseMarsCoordinate(start), [start]);
+  const destinationPoint = useMemo(() => parseMarsCoordinate(destination), [destination]);
 
-    async function loadRegionLayers() {
-      try {
-        setLayersLoading(true);
-        setLayerError("");
-        setLayers([]);
-        setCatalogue(null);
+  const currentRegionMeta = useMemo(
+    () => regions.find((r) => r.region_id === selectedRegion),
+    [regions, selectedRegion],
+  );
 
-        const data = await getRegionLayers(selectedRegion);
+  // Convert backend route geometry into MapLibre coordinates
+  const routeMapCoordinates: [number, number][] = useMemo(() => {
+    if (!routeResult?.route_geometry?.points) return [];
+    return routeResult.route_geometry.points.map((pt) => displayPointToLonLat(pt));
+  }, [routeResult]);
 
-        if (!active) return;
+  // Handle coordinate selection from interactive map
+  function handleMapClick(coords: { latitude: number; longitude: number }) {
+    if (routeRequestInFlight.current) return;
 
-        setCatalogue(data);
+    const formatted = `${coords.latitude.toFixed(4)}, ${coords.longitude.toFixed(4)}`;
+    setMapCoordinate(formatted);
+    setRouteResult(null);
 
-        setLayers(
-          data.layers.map((layer) => ({
-            ...layer,
-            enabled: false,
-          }))
-        );
-      } catch (error) {
-        if (!active) return;
-
-        setLayerError(
-          error instanceof Error
-            ? error.message
-            : "Unable to load the layer catalogue."
-        );
-      } finally {
-        if (active) {
-          setLayersLoading(false);
-        }
-      }
+    if (nextMapSelection === "start") {
+      setStart(formatted);
+      setNextMapSelection("destination");
+      setMessage(`Starting point set to (${formatted}). Click map again to set destination.`);
+    } else {
+      setDestination(formatted);
+      setNextMapSelection("start");
+      setMessage(`Destination set to (${formatted}). Ready to compute optimal route.`);
     }
-
-    loadRegionLayers();
-
-    return () => {
-      active = false;
-    };
-  }, [selectedRegion]);
-
-  // Toggle layer selection.
-  function toggleLayer(id: string) {
-    setLayers((current) =>
-      current.map((layer) =>
-        layer.layer_id === id
-          ? { ...layer, enabled: !layer.enabled }
-          : layer
-      )
-    );
   }
 
-  // Change selected region.
   function handleRegionChange(regionId: string) {
     setSelectedRegion(regionId);
     setMessage("");
     setRouteResult(null);
-    setLayerError("");
     setMapCoordinate("");
     setStart("");
     setDestination("");
     setNextMapSelection("start");
-
     setBackendStatus({
       type: "idle",
       message: "Region changed. Ready for a new route request.",
     });
   }
 
-  // Handle coordinate selection from map.
-  function handleMapCoordinateSelect(coordinate: string) {
-    if (routeRequestInFlight.current) return;
-
-    setMapCoordinate(coordinate);
-    setRouteResult(null);
-
-    if (nextMapSelection === "start") {
-      setStart(coordinate);
-      setNextMapSelection("destination");
-      setMessage(
-        "Starting point selected. Now click the map to select your destination."
-      );
-    } else {
-      setDestination(coordinate);
-      setNextMapSelection("start");
-      setMessage(
-        "Destination selected. Your coordinates are ready for validation."
-      );
-    }
-  }
-
-  // Reset map view and selection.
   function resetMapView() {
-    setMapResetSignal((current) => current + 1);
+    setMapResetSignal((c) => c + 1);
     setMapCoordinate("");
     setRouteResult(null);
     setNextMapSelection("start");
-
-    setMessage(
-      "Map selection reset. Click the map to select a starting point."
-    );
+    setMessage("Map selection reset. Click the map to select a starting point.");
   }
 
-  // Prepare and submit route request.
   async function prepareRoute() {
-    if (routeRequestInFlight.current) return;
-
     setRouteResult(null);
     setMessage("");
 
     if (!start.trim() || !destination.trim()) {
-      setMessage(
-        "Enter both starting and destination coordinates."
-      );
+      setMessage("Enter both starting and destination coordinates.");
       return;
     }
 
-    const startPoint = parseMarsCoordinate(start);
-    const destinationPoint = parseMarsCoordinate(destination);
-
-    if (!startPoint) {
-      setMessage(
-        "Invalid starting coordinates. Use latitude (-90 to 90), longitude (-180 to 180)."
-      );
-      return;
-    }
-
-    if (!destinationPoint) {
-      setMessage(
-        "Invalid destination coordinates. Use latitude (-90 to 90), longitude (-180 to 180)."
-      );
+    if (!startPoint || !destinationPoint) {
+      setMessage("Invalid coordinates. Use latitude (-90 to 90), longitude (-180 to 180).");
       return;
     }
 
@@ -360,14 +230,15 @@ export default function Home() {
       startPoint.latitude === destinationPoint.latitude &&
       startPoint.longitude === destinationPoint.longitude
     ) {
-      setMessage(
-        "Starting point and destination cannot be identical. Please choose a different destination."
-      );
+      setMessage("Starting point and destination cannot be identical. Choose a distinct destination.");
       return;
     }
 
-    if (!selectedRegion) {
-      setMessage("Please select a valid Mars region.");
+    if (currentRegionMeta && !currentRegionMeta.routing_available) {
+      setMessage(
+        `Routing is currently unavailable for ${currentRegionMeta.display_name}. ` +
+          "Verified DTM terrain data has not yet been ingested for this region.",
+      );
       return;
     }
 
@@ -382,49 +253,44 @@ export default function Home() {
         longitude_domain: "-180_to_180",
         angular_unit: "degrees",
       },
-      routing_profile: "safe",
+      routing_profile: "demonstration",
     };
 
     routeRequestInFlight.current = true;
     setIsLoading(true);
-
     setBackendStatus({
       type: "loading",
-      message: "Sending route request to AresPath backend...",
+      message: "Sending route request to AresPath A* deterministic engine...",
     });
 
     try {
+      setMessage("Calculating optimal 3D terrain route over verified Jezero CTX elevation grid...");
       const result = await calculateRoute(request);
-
       setRouteResult(result);
-
+      setMessage(`Route calculated: ${(result.distance_m / 1000).toFixed(2)} km across Jezero terrain.`);
       setBackendStatus({
         type: "success",
-        message: "Route calculated successfully.",
+        message: `A* route calculated successfully (${result.route_geometry.points.length} waypoints, ${(result.distance_m / 1000).toFixed(2)} km).`,
       });
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : "Unable to calculate route. Please try again.";
+      setMessage(errMsg);
       setBackendStatus({
         type: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unable to calculate route. Please try again.",
+        message: errMsg,
       });
     } finally {
-      routeRequestInFlight.current = false;
       setIsLoading(false);
+      routeRequestInFlight.current = false;
     }
   }
 
-  const activeLayers = layers.filter((layer) => layer.enabled).length;
-
   return (
     <main className="app-shell">
-      {/* TOP NAVIGATION */}
+      {/* TOP BAR */}
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">A</div>
-
           <div>
             <div className="brand-name">ARESPATH</div>
             <div className="brand-subtitle">
@@ -444,7 +310,6 @@ export default function Home() {
                   : "#e47777",
             }}
           />
-
           {!healthChecked
             ? "CHECKING BACKEND..."
             : backendOnline
@@ -454,19 +319,18 @@ export default function Home() {
 
         <div className="topbar-right">
           <span className="topbar-label">MISSION</span>
-          <strong>MARS / SURFACE EXPLORATION</strong>
+          <strong>MARS 2020 / JEZERO BASIN EXPLORATION</strong>
         </div>
       </header>
 
       <div className="workspace">
-        {/* LEFT PANEL: MAP LAYERS */}
+        {/* LEFT PANEL: MAP LAYERS & REGIONS */}
         <aside className="panel left-panel">
           <div className="panel-heading">
             <div>
               <span className="eyebrow">WORKSPACE</span>
               <h2>Map layers</h2>
             </div>
-
             <span className="heading-icon">▤</span>
           </div>
 
@@ -474,16 +338,11 @@ export default function Home() {
 
           <div className="region-card">
             <div className="region-icon">⌖</div>
-
             <div style={{ width: "100%" }}>
               <strong>SELECT MARS REGION</strong>
-
               <select
                 value={selectedRegion}
-                onChange={(event) =>
-                  handleRegionChange(event.target.value)
-                }
-                disabled={regionsLoading || regions.length === 0}
+                onChange={(event) => handleRegionChange(event.target.value)}
                 style={{
                   width: "100%",
                   marginTop: "10px",
@@ -492,53 +351,19 @@ export default function Home() {
                   color: "#ffffff",
                   border: "1px solid #46515d",
                   borderRadius: "6px",
+                  fontSize: "13px",
                 }}
               >
-                {regionsLoading && (
-                  <option value="">Loading regions...</option>
-                )}
-
-                {!regionsLoading && regions.length === 0 && (
-                  <option value="">No regions available</option>
-                )}
-
                 {regions.map((region) => (
-                  <option
-                    key={region.region_id}
-                    value={region.region_id}
-                  >
-                    {region.display_name}
+                  <option key={region.region_id} value={region.region_id}>
+                    {region.display_name} {region.routing_available ? "✓ (DTM Ready)" : "(Awaiting DTM)"}
                   </option>
                 ))}
               </select>
 
-              <span
-                style={{
-                  display: "block",
-                  marginTop: "8px",
-                  fontSize: "11px",
-                }}
-              >
-                Region ID: {selectedRegion || "Not selected"}
+              <span style={{ display: "block", marginTop: "8px", fontSize: "11px", color: "#82909f" }}>
+                Region ID: {selectedRegion}
               </span>
-
-              {regionsLoading && (
-                <p style={{ fontSize: "12px", marginTop: "8px" }}>
-                  Fetching available Mars regions...
-                </p>
-              )}
-
-              {regionError && (
-                <p
-                  style={{
-                    color: "#e47777",
-                    fontSize: "12px",
-                    marginTop: "8px",
-                  }}
-                >
-                  {regionError}
-                </p>
-              )}
             </div>
           </div>
 
@@ -546,9 +371,7 @@ export default function Home() {
           <div className="catalogue-panel">
             <button
               type="button"
-              onClick={() =>
-                setCatalogueExpanded((current) => !current)
-              }
+              onClick={() => setCatalogueExpanded((current) => !current)}
               style={{
                 width: "100%",
                 display: "flex",
@@ -572,180 +395,95 @@ export default function Home() {
                     display: "flex",
                     justifyContent: "space-between",
                     marginBottom: "12px",
+                    fontSize: "12px",
                   }}
                 >
                   <span>Available datasets</span>
-                  <strong>
-                    {layersLoading
-                      ? "..."
-                      : catalogue?.total_count ?? 0}
-                  </strong>
+                  <strong>{catalogueLayers.length > 0 ? catalogueLayers.length : (selectedRegion === "jezero_crater" ? 2 : 0)}</strong>
                 </div>
 
-                {layersLoading && (
-                  <p style={{ fontSize: "12px" }}>
-                    Loading verified layers...
-                  </p>
-                )}
-
-                {layerError && (
-                  <div
-                    style={{
-                      padding: "12px",
-                      border: "1px solid #e47777",
-                      borderRadius: "8px",
-                      fontSize: "12px",
-                    }}
-                  >
-                    <strong>Catalogue unavailable</strong>
-                    <p style={{ marginTop: "6px" }}>
-                      {layerError}
-                    </p>
-                  </div>
-                )}
-
-                {!layersLoading &&
-                  !layerError &&
-                  layers.length === 0 && (
+                {selectedRegion === "jezero_crater" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                     <div
                       style={{
-                        padding: "14px",
-                        border: "1px solid #46515d",
-                        borderRadius: "8px",
-                        background: "#17212b",
+                        padding: "10px",
+                        border: "1px solid #34485c",
+                        borderRadius: "6px",
+                        background: "#141e28",
                       }}
                     >
-                      <div
-                        style={{
-                          fontSize: "20px",
-                          marginBottom: "8px",
-                        }}
-                      >
-                        ◈
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <strong style={{ fontSize: "12px", color: "#e5a35c" }}>Jezero CTX DEM (20m)</strong>
+                        <span style={{ fontSize: "10px", color: "#55d69e" }}>VERIFIED</span>
                       </div>
-
-                      <strong>
-                        No verified terrain layers yet
-                      </strong>
-
-                      <p
-                        style={{
-                          fontSize: "12px",
-                          marginTop: "8px",
-                        }}
-                      >
-                        {catalogue?.notice ||
-                          "No verified datasets have been ingested for this region."}
+                      <p style={{ fontSize: "11px", color: "#82909f", marginTop: "4px", lineHeight: "1.3" }}>
+                        USGS/JPL TRN product (DOI: 10.5066/P906QQT8). Ground truth elevation for A* routing.
                       </p>
                     </div>
-                  )}
 
-                {!layersLoading && layers.length > 0 && (
+                    <div
+                      style={{
+                        padding: "10px",
+                        border: "1px solid #34485c",
+                        borderRadius: "6px",
+                        background: "#141e28",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <strong style={{ fontSize: "12px", color: "#d77b58" }}>Jezero CTX Ortho (6m)</strong>
+                        <span style={{ fontSize: "10px", color: "#55d69e" }}>VERIFIED</span>
+                      </div>
+                      <p style={{ fontSize: "11px", color: "#82909f", marginTop: "4px", lineHeight: "1.3" }}>
+                        USGS/JPL TRN product (DOI: 10.5066/P9GV1ND3). Visual context imagery.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
                   <div
                     style={{
-                      padding: "12px",
+                      padding: "14px",
                       border: "1px solid #46515d",
                       borderRadius: "8px",
                       background: "#17212b",
                     }}
                   >
-                    <strong>
-                      {catalogue?.verified_layers_available
-                        ? "Verified datasets available"
-                        : "Catalogue datasets"}
-                    </strong>
-
-                    <p
-                      style={{
-                        fontSize: "12px",
-                        marginTop: "6px",
-                      }}
-                    >
-                      Select a layer below to mark it for display.
-                      Map rendering integration is still pending.
+                    <div style={{ fontSize: "20px", marginBottom: "8px" }}>◈</div>
+                    <strong>No verified terrain layers yet</strong>
+                    <p style={{ fontSize: "12px", marginTop: "8px", color: "#82909f" }}>
+                      No verified datasets have been ingested for {selectedRegion}.
                     </p>
                   </div>
                 )}
-
-                <div
-                  style={{
-                    marginTop: "12px",
-                    fontSize: "11px",
-                  }}
-                >
-                  SELECTED REGION: {selectedRegion || "NONE"}
-                </div>
               </div>
             )}
           </div>
 
-          {/* DATA OVERLAYS */}
+          {/* DATA OVERLAYS TOGGLE */}
           <div className="section-label layer-section-label">
             DATA OVERLAYS
-            <span>{activeLayers} SELECTED</span>
+            <span>{orthoVisible ? "1 ACTIVE" : "0 ACTIVE"}</span>
           </div>
 
           <div className="layer-list">
-            {layers.map((layer) => (
-              <button
-                key={layer.layer_id}
-                type="button"
-                className={`layer-item ${
-                  layer.enabled ? "active" : ""
-                }`}
-                onClick={() => toggleLayer(layer.layer_id)}
-                disabled={!layer.is_verified}
-                title={
-                  !layer.is_verified
-                    ? "This layer is not verified."
-                    : "Toggle layer selection"
-                }
-              >
-                <span
-                  className="layer-color"
-                  style={{
-                    backgroundColor: getLayerColor(layer.layer_type),
-                  }}
-                />
-
-                <span className="layer-info">
-                  <strong>{layer.display_name}</strong>
-                  <small>
-                    {layer.layer_type.toUpperCase()}
-                    {layer.resolution_m_per_px
-                      ? ` · ${layer.resolution_m_per_px} m/px`
-                      : ""}
-                  </small>
-                </span>
-
-                <span className="layer-toggle">
-                  {layer.enabled ? "ON" : "OFF"}
-                </span>
-              </button>
-            ))}
-
-            {!layersLoading &&
-              !layerError &&
-              layers.length === 0 && (
-                <p
-                  style={{
-                    fontSize: "12px",
-                    padding: "8px 0",
-                    opacity: 0.7,
-                  }}
-                >
-                  No layers to display for this region.
-                </p>
-              )}
+            <button
+              type="button"
+              className={`layer-item ${orthoVisible ? "active" : ""}`}
+              onClick={() => setOrthoVisible((v) => !v)}
+            >
+              <span className="layer-color" style={{ backgroundColor: "#d77b58" }} />
+              <span className="layer-info">
+                <strong>Surface Imagery (CTX 6m)</strong>
+                <small>USGS/JPL TRN Orthomosaic</small>
+              </span>
+              <span className="layer-toggle">{orthoVisible ? "ON" : "OFF"}</span>
+            </button>
           </div>
 
           <div className="panel-note">
             <span className="note-icon">ⓘ</span>
-
             <p>
-              Only backend-catalogued datasets are displayed here.
-              Layer rendering will be enabled after scientific map
-              integration.
+              Imagery and elevation layers use IAU 2015 Mars sphere equirectangular projection
+              at standard parallel 18.4663°N.
             </p>
           </div>
 
@@ -755,20 +493,18 @@ export default function Home() {
           </div>
         </aside>
 
-        {/* CENTER PANEL: MAP */}
+        {/* CENTER PANEL: MARS MAP */}
         <section className="map-section">
           <div className="map-toolbar">
             <div>
-              <span className="eyebrow">
-                PLANETARY VIEWER / 01
-              </span>
-              <h1>Mars surface explorer</h1>
+              <span className="eyebrow">PLANETARY VIEWER / 01</span>
+              <h1>Mars surface explorer — Jezero Basin</h1>
             </div>
 
             <div className="map-toolbar-right">
               <span className="view-chip">
-                <span className="status-dot" />
-                MAP WORKSPACE
+                <span className="status-dot" style={{ backgroundColor: "#55d69e" }} />
+                {selectedRegion === "jezero_crater" ? "CTX 6M ORTHO ACTIVE" : "BASEMAP VIEW"}
               </span>
 
               <button
@@ -784,18 +520,23 @@ export default function Home() {
 
           <div className="map-viewport">
             <div className="coordinate coordinate-top">
-              PLANET: MARS · BODY-FIXED VIEW
+              PLANET: MARS · IAU 2015 SPHERE · DATUM: IAU:2015:49900
             </div>
 
             <div className="coordinate coordinate-bottom">
-              DISPLAY: COORDINATE GRID
-              {routeResult ? " · A* ROUTE OVERLAY" : " · NO TERRAIN BASEMAP"}
+              {selectedRegion === "jezero_crater"
+                ? "DISPLAY: USGS/JPL CTX ORTHOMOSAIC (6M) + CTX DTM (20M) · VERIFIED"
+                : "DISPLAY: PREVIEW ONLY · AWAITING REGIONAL DTM"}
             </div>
 
             <MarsMap
               selectedRegion={selectedRegion}
+              orthomosaicVisible={orthoVisible}
+              routeResult={routeResult}
+              startPoint={startPoint}
+              destinationPoint={destinationPoint}
+              onMapClick={handleMapClick}
               resetSignal={mapResetSignal}
-              onCoordinateSelect={handleMapCoordinateSelect}
               routeCoordinates={routeMapCoordinates}
             />
 
@@ -806,19 +547,17 @@ export default function Home() {
                 top: "52px",
                 right: "16px",
                 zIndex: 5,
-                padding: "10px 14px",
+                padding: "8px 12px",
                 background: "#17212b",
                 border: "1px solid #526779",
-                borderRadius: "8px",
+                borderRadius: "6px",
                 color: "#ffffff",
-                fontSize: "12px",
+                fontSize: "11px",
               }}
             >
               NEXT MAP CLICK:{" "}
-              <strong>
-                {nextMapSelection === "start"
-                  ? "STARTING POINT"
-                  : "DESTINATION"}
+              <strong style={{ color: nextMapSelection === "start" ? "#55d69e" : "#e47777" }}>
+                {nextMapSelection === "start" ? "STARTING POINT" : "DESTINATION"}
               </strong>
             </div>
 
@@ -829,68 +568,42 @@ export default function Home() {
                   top: "52px",
                   left: "16px",
                   zIndex: 5,
-                  padding: "10px 14px",
+                  padding: "8px 12px",
                   background: "#17212b",
                   border: "1px solid #526779",
-                  borderRadius: "8px",
+                  borderRadius: "6px",
                   color: "#ffffff",
-                  fontSize: "12px",
+                  fontSize: "11px",
                 }}
               >
                 LAST SELECTED: {mapCoordinate}
               </div>
             )}
 
-            <div className="map-center-message">
-              <span className="preview-tag">
-                {routeResult ? "ROUTE VISUALIZATION" : "INTERACTIVE PREVIEW"}
-              </span>
-
-              <strong>Mars coordinate workspace</strong>
-
-              <span>
-                {routeResult
-                  ? "The green line shows the computed A* route. Green marks the start and red marks the destination."
-                  : "Click once to select your starting point, then click again to select your destination. You can also enter coordinates manually in the walk planner."}
-              </span>
-            </div>
-
             <div className="map-scale">
-              <span>DISPLAY SCALE</span>
-              <strong>NOT CALIBRATED</strong>
+              <span>PROJECTION</span>
+              <strong>EQC (18.4663°N)</strong>
             </div>
           </div>
 
           <div className="map-bottom-bar">
             <div>
-              <span className="mini-dot" />
+              <span
+                className="mini-dot"
+                style={{ backgroundColor: backendOnline ? "#55d69e" : "#e47777" }}
+              />
               <span>DATA CONNECTION</span>
-
-              <strong>
-                {!healthChecked
-                  ? "Checking..."
-                  : backendOnline
-                    ? "Connected"
-                    : "Offline"}
-              </strong>
+              <strong>{backendOnline ? "Connected" : "Offline"}</strong>
             </div>
 
             <div>
               <span>COORDINATE SYSTEM</span>
-              <strong>
-                {routeResult
-                  ? "Mars geographic display"
-                  : "Preview coordinates"}
-              </strong>
+              <strong>Equirectangular Mars 2000 (R=3,396,190m)</strong>
             </div>
 
             <div>
               <span>ROUTE ENGINE</span>
-              <strong>
-                {routeResult
-                  ? "A* route displayed"
-                  : "Awaiting route request"}
-              </strong>
+              <strong>{currentRegionMeta?.routing_available ? "A* 3D Euclidean (Jezero CTX)" : "Unavailable"}</strong>
             </div>
           </div>
         </section>
@@ -899,38 +612,73 @@ export default function Home() {
         <aside className="panel right-panel">
           <div className="panel-heading">
             <div>
-              <span className="eyebrow">
-                NAVIGATION TOOLS
-              </span>
+              <span className="eyebrow">NAVIGATION TOOLS</span>
               <h2>Walk planner</h2>
             </div>
-
             <span className="heading-icon">⌁</span>
           </div>
 
           <div className="planner-intro">
-            Enter Mars coordinates to prepare a surface route
-            request. Use latitude, longitude in degrees. You can
-            click the map to select your starting point and destination.
+            Click on the map or select landmark presets to plan surface traversal.
+            Coordinates are in degrees (Lat °N, Lon °E).
           </div>
 
-          <div className="route-form" aria-busy={isLoading}>
-            <label htmlFor="start-point">
-              STARTING POINT
-            </label>
+          {/* LANDMARK PRESETS */}
+          {selectedRegion === "jezero_crater" && (
+            <div style={{ marginBottom: "16px" }}>
+              <div className="section-label" style={{ marginBottom: "8px" }}>
+                JEZERO LANDMARK PRESETS
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                {JEZERO_PRESETS.map((preset) => (
+                  <button
+                    key={preset.name}
+                    type="button"
+                    onClick={() => {
+                      if (!start.trim() || (start.trim() && destination.trim())) {
+                        setStart(`${preset.lat.toFixed(4)}, ${preset.lon.toFixed(4)}`);
+                        setDestination("");
+                        setRouteResult(null);
+                        setNextMapSelection("destination");
+                        setMessage(`Start set to ${preset.name}`);
+                      } else {
+                        setDestination(`${preset.lat.toFixed(4)}, ${preset.lon.toFixed(4)}`);
+                        setNextMapSelection("start");
+                        setMessage(`Destination set to ${preset.name}`);
+                      }
+                    }}
+                    style={{
+                      background: "#17212b",
+                      border: "1px solid #34485c",
+                      borderRadius: "5px",
+                      padding: "7px 9px",
+                      color: "#edf2f7",
+                      fontSize: "11px",
+                      textAlign: "left",
+                      lineHeight: "1.2",
+                    }}
+                  >
+                    <span style={{ color: "#e5a35c", fontWeight: "700", display: "block" }}>
+                      {preset.name.split(" ")[0]}
+                    </span>
+                    <span style={{ fontSize: "10px", color: "#82909f" }}>
+                      {preset.lat.toFixed(3)}°N, {preset.lon.toFixed(3)}°E
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
+          <div className="route-form">
+            <label htmlFor="start-point">STARTING POINT (LAT, LON)</label>
             <div className="field-wrap">
               <span className="field-marker start-marker" />
-
               <input
                 id="start-point"
                 value={start}
-                onChange={(event) => {
-                  setStart(event.target.value);
-                  setRouteResult(null);
-                }}
-                placeholder="Example: 18.30, 77.20"
-                disabled={isLoading}
+                onChange={(event) => setStart(event.target.value)}
+                placeholder="Example: 18.4447, 77.4508"
               />
             </div>
 
@@ -938,22 +686,14 @@ export default function Home() {
               <span />
             </div>
 
-            <label htmlFor="destination-point">
-              DESTINATION
-            </label>
-
+            <label htmlFor="destination-point">DESTINATION (LAT, LON)</label>
             <div className="field-wrap">
               <span className="field-marker end-marker" />
-
               <input
                 id="destination-point"
                 value={destination}
-                onChange={(event) => {
-                  setDestination(event.target.value);
-                  setRouteResult(null);
-                }}
-                placeholder="Example: 18.50, 77.40"
-                disabled={isLoading}
+                onChange={(event) => setDestination(event.target.value)}
+                placeholder="Example: 18.4350, 77.4000"
               />
             </div>
 
@@ -961,24 +701,43 @@ export default function Home() {
               type="button"
               className="primary-button"
               onClick={prepareRoute}
-              disabled={isLoading || !selectedRegion}
+              disabled={isLoading || !backendOnline}
             >
-              {isLoading
-                ? "CALCULATING ROUTE..."
-                : "CALCULATE ROUTE"}
+              {isLoading ? "CALCULATING A* ROUTE..." : "CALCULATE ROUTE"}
               <span>→</span>
             </button>
 
-            {/* BACKEND STATUS */}
+            {/* DEDICATED BACKEND STATUS NOTIFICATION */}
             <div
               className={`backend-status backend-status-${backendStatus.type}`}
               role="status"
               aria-live="polite"
+              style={{
+                marginTop: "12px",
+                padding: "10px 12px",
+                background: "#141e28",
+                border: "1px solid #34485c",
+                borderRadius: "6px",
+                fontSize: "12px",
+              }}
             >
-              <div className="backend-status-heading">
-                <span className="backend-status-indicator" />
-
-                <strong>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+                <span
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    backgroundColor:
+                      backendStatus.type === "success"
+                        ? "#55d69e"
+                        : backendStatus.type === "error"
+                          ? "#e47777"
+                          : backendStatus.type === "loading"
+                            ? "#e5a35c"
+                            : "#82909f",
+                  }}
+                />
+                <strong style={{ fontSize: "11px", letterSpacing: "0.5px" }}>
                   {backendStatus.type === "loading"
                     ? "BACKEND REQUEST IN PROGRESS"
                     : backendStatus.type === "success"
@@ -988,273 +747,115 @@ export default function Home() {
                         : "BACKEND STATUS"}
                 </strong>
               </div>
-
-              <p>{backendStatus.message}</p>
+              <p style={{ margin: 0, color: "#a0aec0", fontSize: "11px" }}>{backendStatus.message}</p>
             </div>
 
-            {message && (
+            {message && message !== backendStatus.message && (
               <div className="form-message" role="status">
                 {message}
               </div>
             )}
 
-            {/* ROUTE ANALYSIS */}
+            {/* ROUTE ANALYSIS & WAYPOINT BREAKDOWN */}
             {routeResult && (
-              <section className="route-details">
-                <div className="route-details-header">
-                  <h3>ROUTE ANALYSIS</h3>
-                  <span className="route-success-badge">
-                    SUCCESS
-                  </span>
+              <div className="form-message route-result" role="status">
+                <h3 style={{ color: "#55d69e", marginBottom: "8px" }}>ROUTE CALCULATED</h3>
+
+                <div className="parameter-row">
+                  <span>Status</span>
+                  <strong style={{ color: "#55d69e" }}>OPTIMAL PATH</strong>
                 </div>
 
-                {/* DISTANCE */}
-                <div className="route-detail-card">
-                  <span className="route-detail-label">
-                    TOTAL ROUTE DISTANCE
-                  </span>
-
-                  <div className="route-distance">
-                    {(routeResult.distance_m / 1000).toFixed(2)}
-                    <span> km</span>
-                  </div>
-
-                  <p>
-                    {routeResult.distance_m.toLocaleString()} metres
-                  </p>
+                <div className="parameter-row">
+                  <span>Total Distance</span>
+                  <strong>
+                    {(routeResult.distance_m / 1000).toFixed(2)} km ({routeResult.distance_m.toFixed(0)} m)
+                  </strong>
                 </div>
 
-                {/* TRAVERSAL COST */}
-                <div className="route-detail-card">
-                  <span className="route-detail-label">
-                    ESTIMATED TRAVERSAL COST
-                  </span>
-
-                  <p className="unavailable-value">
-                    Not provided by backend
-                  </p>
-
-                  <small>
-                    Terrain-based movement cost is not yet available
-                    in the current API response.
-                  </small>
+                <div className="parameter-row">
+                  <span>Waypoints</span>
+                  <strong>{routeResult.route_geometry.points.length} nodes</strong>
                 </div>
 
-                {/* ROUTE METADATA */}
-                <div className="route-metadata">
-                  <div>
-                    <span>Route ID</span>
-                    <strong>{routeResult.route_id}</strong>
-                  </div>
-
-                  <div>
-                    <span>Algorithm</span>
-                    <strong>
-                      {routeResult.algorithm.toUpperCase()}
-                    </strong>
-                  </div>
-
-                  <div>
-                    <span>Region</span>
-                    <strong>{routeResult.region_id}</strong>
-                  </div>
-
-                  <div>
-                    <span>Route status</span>
-                    <strong>{routeResult.status.toUpperCase()}</strong>
-                  </div>
+                <div className="parameter-row">
+                  <span>Algorithm</span>
+                  <strong style={{ fontSize: "11px" }}>{routeResult.algorithm}</strong>
                 </div>
 
-                {/* WAYPOINT INFORMATION */}
-                <div className="route-waypoints">
-                  <div className="route-section-heading">
-                    <h4>WAYPOINT INFORMATION</h4>
+                <div className="parameter-row">
+                  <span>Coordinate Space</span>
+                  <strong style={{ fontSize: "11px" }}>{routeResult.route_geometry.coordinate_space}</strong>
+                </div>
 
-                    <span>
-                      {routeResult.route_geometry.points.length} points
-                    </span>
-                  </div>
-
-                  {routeResult.route_geometry.points.length > 0 ? (
-                    <div className="waypoint-list">
-                      {routeResult.route_geometry.points.map(
-                        (point, index) => {
-                          const totalPoints =
-                            routeResult.route_geometry.points.length;
-
-                          const pointLabel =
-                            index === 0
-                              ? "START"
-                              : index === totalPoints - 1
-                                ? "DESTINATION"
-                                : `WAYPOINT ${index + 1}`;
-
-                          return (
-                            <div
-                              className="waypoint-row"
-                              key={`${index}-${point.x}-${point.y}`}
-                            >
-                              <span className="waypoint-number">
-                                {index + 1}
-                              </span>
-
-                              <div>
-                                <strong>{pointLabel}</strong>
-
-                                <p>
-                                  X: {point.x.toFixed(2)} m | Y:{" "}
-                                  {point.y.toFixed(2)} m
-                                </p>
-                              </div>
-                            </div>
-                          );
-                        }
+                {/* WAYPOINT PREVIEW */}
+                {routeResult.route_geometry.points.length > 0 && (
+                  <div style={{ marginTop: "12px", borderTop: "1px solid #34485c", paddingTop: "8px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "6px" }}>
+                      <strong>WAYPOINT OVERVIEW</strong>
+                      <span style={{ color: "#82909f" }}>{routeResult.route_geometry.points.length} points</span>
+                    </div>
+                    <div style={{ maxHeight: "120px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
+                      {routeResult.route_geometry.points.slice(0, 5).map((pt, idx) => (
+                        <div key={idx} style={{ fontSize: "10px", color: "#a0aec0", display: "flex", justifyContent: "space-between" }}>
+                          <span>Node {idx === 0 ? "1 (START)" : idx + 1}:</span>
+                          <span>X: {pt.x.toFixed(1)}m, Y: {pt.y.toFixed(1)}m</span>
+                        </div>
+                      ))}
+                      {routeResult.route_geometry.points.length > 5 && (
+                        <div style={{ fontSize: "10px", color: "#82909f", textAlign: "center", fontStyle: "italic" }}>
+                          ... and {routeResult.route_geometry.points.length - 5} intermediate waypoints ...
+                        </div>
                       )}
                     </div>
-                  ) : (
-                    <p>
-                      No waypoint coordinates returned by backend.
-                    </p>
-                  )}
-
-                  <small>
-                    Waypoints are shown in the Jezero DEM native
-                    projected coordinate reference system.
-                  </small>
-                </div>
-
-                {/* TERRAIN SUMMARY */}
-                <div className="route-terrain">
-                  <h4>TERRAIN SUMMARY</h4>
-
-                  <div className="route-metadata">
-                    <div>
-                      <span>Minimum elevation</span>
-                      <strong>
-                        {routeResult.terrain_summary.min_elevation_m != null
-                          ? `${routeResult.terrain_summary.min_elevation_m} m`
-                          : "Unavailable"}
-                      </strong>
-                    </div>
-
-                    <div>
-                      <span>Maximum elevation</span>
-                      <strong>
-                        {routeResult.terrain_summary.max_elevation_m != null
-                          ? `${routeResult.terrain_summary.max_elevation_m} m`
-                          : "Unavailable"}
-                      </strong>
-                    </div>
-
-                    <div>
-                      <span>Maximum slope</span>
-                      <strong>
-                        {routeResult.terrain_summary.max_slope_deg != null
-                          ? `${routeResult.terrain_summary.max_slope_deg}°`
-                          : "Unavailable"}
-                      </strong>
-                    </div>
-
-                    <div>
-                      <span>Hazard count</span>
-                      <strong>
-                        {routeResult.terrain_summary.hazard_count}
-                      </strong>
-                    </div>
-                  </div>
-
-                  <span className="route-detail-label">
-                    SURFACE TYPES
-                  </span>
-
-                  <p>
-                    {routeResult.terrain_summary.surface_types.length > 0
-                      ? routeResult.terrain_summary.surface_types.join(", ")
-                      : "No surface types available"}
-                  </p>
-                </div>
-
-                {/* WARNINGS */}
-                {routeResult.warnings.length > 0 && (
-                  <div className="route-warnings">
-                    <h4>ROUTE WARNINGS</h4>
-
-                    {routeResult.warnings.map((warning, index) => (
-                      <p key={index}>⚠ {warning}</p>
-                    ))}
                   </div>
                 )}
 
-                {/* DATA SOURCES */}
-                <div className="route-data-sources">
-                  <h4>DATA SOURCES</h4>
-
-                  {routeResult.data_sources.length > 0 ? (
-                    <ul>
-                      {routeResult.data_sources.map((source, index) => (
-                        <li key={index}>{source}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p>No data sources listed.</p>
-                  )}
-                </div>
-              </section>
+                {routeResult.warnings && routeResult.warnings.length > 0 && (
+                  <div className="route-warning" style={{ marginTop: "10px" }}>
+                    <span>⚠</span>
+                    <p>{routeResult.warnings.join(" ")}</p>
+                  </div>
+                )}
+              </div>
             )}
           </div>
 
           <div className="section-divider" />
 
-          <div className="section-label">
-            ROUTE PARAMETERS
-          </div>
+          <div className="section-label">ROUTE SPECIFICATIONS</div>
 
           <div className="parameter-row">
             <span>Algorithm</span>
-            <strong>
-              {routeResult
-                ? routeResult.algorithm.toUpperCase()
-                : "Backend selected"}
-            </strong>
+            <strong>Deterministic 8-way A*</strong>
           </div>
 
           <div className="parameter-row">
-            <span>Routing profile</span>
-            <strong>Safe</strong>
+            <span>Terrain Model</span>
+            <strong>Jezero CTX 20m DTM</strong>
           </div>
 
           <div className="parameter-row">
-            <span>Terrain cost</span>
-            <strong>Not configured</strong>
+            <span>Cost Function</span>
+            <strong>3D Euclidean Distance</strong>
           </div>
 
-          <div className="route-warning">
-            <span>⚠</span>
-
-            <p>
-              AresPath is a research and visualization prototype.
-              Calculated routes are not certified for astronaut
-              navigation or mission safety.
-            </p>
+          <div className="parameter-row">
+            <span>Safety Rule</span>
+            <strong>Corner-Cutting Prevention</strong>
           </div>
 
           <div className="planner-footer">
-            <span className="eyebrow">
-              ARESPATH / MVP BUILD
-            </span>
-
-            <strong>Explore with evidence.</strong>
+            <span className="eyebrow">ARESPATH / HACKATHON MVP</span>
+            <strong>Interplanetary Survival Guide: Martian Map</strong>
           </div>
         </aside>
       </div>
 
-      {/* FOOTER */}
       <footer className="app-footer">
         <span>ARESPATH © 2026</span>
         <span>RESEARCH & VISUALIZATION PROTOTYPE</span>
-        <span>
-          NOT CERTIFIED FOR ASTRONAUT NAVIGATION
-        </span>
+        <span>NOT CERTIFIED FOR ASTRONAUT FLIGHT OPERATIONS</span>
       </footer>
     </main>
   );

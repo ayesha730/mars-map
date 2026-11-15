@@ -59,46 +59,69 @@ _REGIONS: dict[str, RegionMetadata] = {
         ),
         source_crs=MarsCoordinateReference(),
         display_projection=DisplayProjectionDefinition(
-            projection_name=None,  # To be populated from verified DEM PDS label
-            proj4_string=None,     # Requires verified CTX/HiRISE dataset config
-            wkt2_string=None,      # Requires verified CTX/HiRISE dataset config
+            projection_name="Equirectangular",
+            proj4_string=(
+                "+proj=eqc +lat_ts=18.4663 +lat_0=0 +lon_0=0 +x_0=0 +y_0=0 "
+                "+R=3396190 +units=m +no_defs"
+            ),
+            wkt2_string=(
+                'PROJCS["Jezero_Crater_Projection",GEOGCS["GCS_Mars_2000_Sphere",'
+                'DATUM["Mars_2000_(Sphere)",SPHEROID["Mars_2000_Sphere",3396190,0]],'
+                'PRIMEM["Reference_Meridian",0],UNIT["degree",0.0174532925199433]],'
+                'PROJECTION["Equirectangular"],PARAMETER["standard_parallel_1",18.4663],'
+                'PARAMETER["central_meridian",0],PARAMETER["false_easting",0],'
+                'PARAMETER["false_northing",0],UNIT["metre",1]]'
+            ),
+            datum="IAU:2015:49900",
+            semi_major_axis_m=3396190.0,
+            inverse_flattening=0.0,
         ),
         display_origin=DisplayOrigin(
-            description=(
-                "Region-specific origin, to be defined from the verified DEM "
-                "dataset extent.  Not yet assigned."
-            ),
-            latitude_deg=None,   # Populated from verified dataset config
-            longitude_deg=None,  # Populated from verified dataset config
-            source=None,
+            description="Center of Jezero Crater CTX mosaic (18.4354°N, 77.7900°E)",
+            latitude_deg=18.4354,
+            longitude_deg=77.7900,
+            source="USGS Mars 2020 CTX DEM mosaic (DOI: 10.5066/P906QQT8)",
         ),
         transformation=TransformationParameters(
-            method="Pending — awaiting verified DEM dataset integration",
-            parameters=None,     # Populated from verified dataset config
+            method="Mars 2000 Sphere Equirectangular (standard parallel 18.4663°N, R=3,396,190m)",
+            parameters={
+                "standard_parallel_1": 18.4663,
+                "central_meridian": 0.0,
+                "semi_major_axis_m": 3396190.0,
+                "false_easting": 0.0,
+                "false_northing": 0.0,
+            },
             notes=(
-                "Transformation from Mars planetocentric lat/lon to the "
-                "arespath_display_v1 local East-North frame will be defined "
-                "once the HiRISE/CTX DEM PDS label is processed."
+                "Direct equirectangular transformation from Mars planetocentric "
+                "lat/lon to arespath_display_v1 projected metres."
             ),
         ),
         datasets=[
             DatasetProvenance(
-                name="Placeholder — no verified terrain dataset integrated",
-                agency="N/A",
-                instrument=None,
-                mission=None,
-                resolution_m_per_px=None,
-                coverage=None,
-                reference_url=None,
-                is_synthetic=True,
-                synthetic_description=(
-                    "Real data would be a CTX or HiRISE DEM from MRO, "
-                    "available via NASA PDS Geosciences Node."
-                ),
-            )
+                name="Mars 2020 Terrain Relative Navigation CTX DTM Mosaic",
+                agency="USGS Astrogeology / NASA JPL",
+                instrument="Context Camera (CTX)",
+                mission="Mars Reconnaissance Orbiter (MRO) / Mars 2020",
+                resolution_m_per_px=20.0,
+                coverage="Jezero Crater regional basin: Lat [17.5805°N, 19.2902°N], Lon [76.9974°E, 78.5826°E]",
+                reference_url="https://astrogeology.usgs.gov/search/map/mars_2020_science_investigation_ctx_dem_mosaic",
+                is_synthetic=False,
+                synthetic_description=None,
+            ),
+            DatasetProvenance(
+                name="Mars 2020 Terrain Relative Navigation Context Camera (CTX) Orthorectified Image Mosaic",
+                agency="USGS Astrogeology / NASA JPL",
+                instrument="Context Camera (CTX)",
+                mission="Mars Reconnaissance Orbiter (MRO) / Mars 2020",
+                resolution_m_per_px=6.0,
+                coverage="Jezero Crater Perseverance landing area: Lat [18.2110°N, 18.7212°N], Lon [77.1605°E, 77.6992°E]",
+                reference_url="https://astrogeology.usgs.gov/search/map/mars-2020-terrain-relative-navigation-context-camera-orthorectified-image-mosaic",
+                is_synthetic=False,
+                synthetic_description=None,
+            ),
         ],
-        routing_available=False,
-        routing_unavailable_reason="ROUTING_DATA_UNAVAILABLE",
+        routing_available=True,
+        routing_unavailable_reason=None,
     ),
     "gale_crater": RegionMetadata(
         region_id="gale_crater",
@@ -142,6 +165,22 @@ _REGIONS: dict[str, RegionMetadata] = {
 }
 
 
+def _sync_region(region: RegionMetadata, http_request: Optional[Request]) -> RegionMetadata:
+    """
+    Synchronizes region routing_available status with the live application DEM state.
+    """
+    if http_request is not None and hasattr(http_request.app, "state") and hasattr(http_request.app.state, "regional_dems"):
+        dems = getattr(http_request.app.state, "regional_dems", {})
+        entry = dems.get(region.region_id)
+        is_active = bool(entry is not None and entry.transformer is not None and not entry.transformer.is_closed)
+        if is_active != region.routing_available:
+            return region.model_copy(update={
+                "routing_available": is_active,
+                "routing_unavailable_reason": None if is_active else "ROUTING_DATA_UNAVAILABLE",
+            })
+    return region
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -152,7 +191,7 @@ _REGIONS: dict[str, RegionMetadata] = {
     summary="List all supported Mars surface regions with full metadata",
     tags=["Regions"],
 )
-async def list_regions():
+async def list_regions(http_request: Request = None):
     """
     Returns the full metadata contract for every registered Mars surface
     region, including:
@@ -163,7 +202,7 @@ async def list_regions():
     - Transformation method and parameters
     - Dataset coverage and provenance
     """
-    return list(_REGIONS.values())
+    return [_sync_region(r, http_request) for r in _REGIONS.values()]
 
 
 @router.get(
@@ -175,7 +214,7 @@ async def list_regions():
     },
     tags=["Regions"],
 )
-async def get_region(region_id: str, http_request: Request):
+async def get_region(region_id: str, http_request: Request = None):
     """
     Returns the full metadata contract for the requested region.
     """
@@ -196,4 +235,4 @@ async def get_region(region_id: str, http_request: Request):
                 request_id=request_id,
             ).model_dump(),
         )
-    return region
+    return _sync_region(region, http_request)
