@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import {
   Map as MapLibreMap,
   NavigationControl,
   Marker,
   LngLatBounds,
   setWorkerUrl,
-  GeoJSONSource,
+  type GeoJSONSource,
 } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import {
@@ -44,6 +44,70 @@ export interface MarsMapProps {
   startPoint?: { latitude: number; longitude: number } | null;
   destinationPoint?: { latitude: number; longitude: number } | null;
   onMapClick?: (coords: { latitude: number; longitude: number }) => void;
+  // Ayesha PR #2 compatibility props
+  resetSignal?: number;
+  onCoordinateSelect?: (coordinate: string) => void;
+  routeCoordinates?: [number, number][];
+}
+
+interface GridFeature {
+  type: "Feature";
+  properties: Record<string, unknown>;
+  geometry: {
+    type: "LineString";
+    coordinates: number[][];
+  };
+}
+
+function createGrid() {
+  const features: GridFeature[] = [];
+
+  for (let latitude = -80; latitude <= 80; latitude += 10) {
+    const coordinates: number[][] = [];
+    for (let longitude = -180; longitude <= 180; longitude += 5) {
+      coordinates.push([longitude, latitude]);
+    }
+    features.push({
+      type: "Feature",
+      properties: {},
+      geometry: { type: "LineString", coordinates },
+    });
+  }
+
+  for (let longitude = -180; longitude <= 180; longitude += 10) {
+    const coordinates: number[][] = [];
+    for (let latitude = -80; latitude <= 80; latitude += 5) {
+      coordinates.push([longitude, latitude]);
+    }
+    features.push({
+      type: "Feature",
+      properties: {},
+      geometry: { type: "LineString", coordinates },
+    });
+  }
+
+  return {
+    type: "FeatureCollection" as const,
+    features,
+  };
+}
+
+function createRegionMarkers() {
+  return {
+    type: "FeatureCollection" as const,
+    features: [
+      {
+        type: "Feature" as const,
+        properties: { name: "Jezero Crater" },
+        geometry: { type: "Point" as const, coordinates: [77.43, 18.45] },
+      },
+      {
+        type: "Feature" as const,
+        properties: { name: "Gale Crater" },
+        geometry: { type: "Point" as const, coordinates: [137.4, -4.6] },
+      },
+    ],
+  };
 }
 
 function createMarkerElement(label: string, color: string, title: string): HTMLDivElement {
@@ -67,6 +131,89 @@ function createMarkerElement(label: string, color: string, title: string): HTMLD
   return el;
 }
 
+function createRouteFeature(coordinates: [number, number][]) {
+  return {
+    type: "FeatureCollection" as const,
+    features:
+      coordinates.length >= 2
+        ? [
+            {
+              type: "Feature" as const,
+              properties: {},
+              geometry: {
+                type: "LineString" as const,
+                coordinates,
+              },
+            },
+          ]
+        : [],
+  };
+}
+
+function createRouteMarkers(coordinates: [number, number][]) {
+  if (coordinates.length === 0) {
+    return {
+      type: "FeatureCollection" as const,
+      features: [],
+    };
+  }
+
+  const features = [
+    {
+      type: "Feature" as const,
+      properties: {
+        kind: "start",
+        label: "START",
+      },
+      geometry: {
+        type: "Point" as const,
+        coordinates: coordinates[0],
+      },
+    },
+  ];
+
+  if (coordinates.length > 1) {
+    features.push({
+      type: "Feature" as const,
+      properties: {
+        kind: "destination",
+        label: "DESTINATION",
+      },
+      geometry: {
+        type: "Point" as const,
+        coordinates: coordinates[coordinates.length - 1],
+      },
+    });
+  }
+
+  return {
+    type: "FeatureCollection" as const,
+    features,
+  };
+}
+
+function fitMapToRoute(
+  map: MapLibreMap,
+  coordinates: [number, number][],
+) {
+  if (coordinates.length < 2) return;
+
+  const bounds = new LngLatBounds(
+    coordinates[0],
+    coordinates[0],
+  );
+
+  for (const coordinate of coordinates.slice(1)) {
+    bounds.extend(coordinate);
+  }
+
+  map.fitBounds(bounds, {
+    padding: 80,
+    maxZoom: 15,
+    duration: 1000,
+  });
+}
+
 export default function MarsMap({
   selectedRegion = "jezero_crater",
   orthomosaicVisible = true,
@@ -74,16 +221,35 @@ export default function MarsMap({
   startPoint = null,
   destinationPoint = null,
   onMapClick,
+  resetSignal = 0,
+  onCoordinateSelect,
+  routeCoordinates,
 }: MarsMapProps) {
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const startMarkerRef = useRef<Marker | null>(null);
   const destMarkerRef = useRef<Marker | null>(null);
   const onMapClickRef = useRef(onMapClick);
+  const onCoordinateSelectRef = useRef(onCoordinateSelect);
 
   useEffect(() => {
     onMapClickRef.current = onMapClick;
   }, [onMapClick]);
+
+  useEffect(() => {
+    onCoordinateSelectRef.current = onCoordinateSelect;
+  }, [onCoordinateSelect]);
+
+  // Derive active route coordinates from either routeCoordinates prop or routeResult
+  const activeCoordinates: [number, number][] = useMemo(() => {
+    if (routeCoordinates && routeCoordinates.length > 0) {
+      return routeCoordinates;
+    }
+    if (routeResult?.route_geometry?.points && routeResult.route_geometry.points.length > 0) {
+      return routeResult.route_geometry.points.map((pt) => displayPointToLonLat(pt));
+    }
+    return [];
+  }, [routeCoordinates, routeResult]);
 
   // 1. Initialize Map
   useEffect(() => {
@@ -109,7 +275,7 @@ export default function MarsMap({
       },
       center: initialCenter,
       zoom: initialZoom,
-      minZoom: 2,
+      minZoom: 1,
       maxZoom: 18,
       renderWorldCopies: false,
       attributionControl: false,
@@ -125,7 +291,25 @@ export default function MarsMap({
     );
 
     map.on("load", () => {
-      // Add Jezero CTX Orthomosaic raster image source
+      // Coordinate grid lines
+      map.addSource("mars-coordinate-grid", {
+        type: "geojson",
+        data: createGrid(),
+      });
+
+      map.addLayer({
+        id: "mars-grid-lines",
+        type: "line",
+        source: "mars-coordinate-grid",
+        paint: {
+          "line-color": "#526779",
+          "line-width": 1,
+          "line-opacity": 0.35,
+          "line-dasharray": [2, 3],
+        },
+      });
+
+      // Jezero CTX Orthomosaic raster image source (USGS/JPL TRN 6m)
       const previewUrl = getRasterPreviewUrl("jezero_ctx_orthomosaic_6m", {
         ...JEZERO_ORTHO_BOUNDS,
         max_dimension: 2048,
@@ -155,20 +339,51 @@ export default function MarsMap({
         },
       });
 
-      // Add GeoJSON route line source
-      map.addSource("active-route-source", {
+      // Mars region markers
+      map.addSource("mars-region-marker", {
         type: "geojson",
-        data: {
-          type: "FeatureCollection",
-          features: [],
+        data: createRegionMarkers(),
+      });
+
+      map.addLayer({
+        id: "mars-region-points",
+        type: "circle",
+        source: "mars-region-marker",
+        paint: {
+          "circle-radius": 6,
+          "circle-color": "#e5a35c",
+          "circle-stroke-color": "#fff0d4",
+          "circle-stroke-width": 2,
         },
       });
 
-      // Route casing for contrast against terrain imagery
       map.addLayer({
-        id: "active-route-casing",
+        id: "mars-region-labels",
+        type: "symbol",
+        source: "mars-region-marker",
+        layout: {
+          "text-field": ["get", "name"],
+          "text-size": 11,
+          "text-offset": [0, 1.2],
+          "text-anchor": "top",
+        },
+        paint: {
+          "text-color": "#e5a35c",
+          "text-halo-color": "#0b121a",
+          "text-halo-width": 1.5,
+        },
+      });
+
+      // Route casing for high contrast against imagery
+      map.addSource("mars-computed-route", {
+        type: "geojson",
+        data: createRouteFeature(activeCoordinates),
+      });
+
+      map.addLayer({
+        id: "mars-route-casing",
         type: "line",
-        source: "active-route-source",
+        source: "mars-computed-route",
         layout: {
           "line-cap": "round",
           "line-join": "round",
@@ -180,11 +395,11 @@ export default function MarsMap({
         },
       });
 
-      // Active route line in bright mission green
+      // Active computed route line in high-visibility mission green
       map.addLayer({
-        id: "active-route-line",
+        id: "mars-route-line",
         type: "line",
-        source: "active-route-source",
+        source: "mars-computed-route",
         layout: {
           "line-cap": "round",
           "line-join": "round",
@@ -195,15 +410,66 @@ export default function MarsMap({
           "line-opacity": 1.0,
         },
       });
+
+      // Route start/destination markers layer
+      map.addSource("mars-route-markers", {
+        type: "geojson",
+        data: createRouteMarkers(activeCoordinates),
+      });
+
+      map.addLayer({
+        id: "mars-route-marker-circles",
+        type: "circle",
+        source: "mars-route-markers",
+        paint: {
+          "circle-radius": 7,
+          "circle-color": [
+            "match",
+            ["get", "kind"],
+            "start",
+            "#55d69e",
+            "destination",
+            "#e47777",
+            "#ffffff",
+          ],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
+      });
+
+      map.addLayer({
+        id: "mars-route-marker-labels",
+        type: "symbol",
+        source: "mars-route-markers",
+        layout: {
+          "text-field": ["get", "label"],
+          "text-size": 10,
+          "text-offset": [0, 1.5],
+          "text-anchor": "top",
+        },
+        paint: {
+          "text-color": "#ffffff",
+          "text-halo-color": "#101923",
+          "text-halo-width": 2,
+        },
+      });
+
+      if (activeCoordinates.length >= 2) {
+        fitMapToRoute(map, activeCoordinates);
+      }
     });
 
-    // Map click handler
+    // Map click handler (supports both object and string coordinate subscribers)
     map.on("click", (e) => {
+      const lat = Number(e.lngLat.lat.toFixed(4));
+      const lon = Number(e.lngLat.lng.toFixed(4));
+
       if (onMapClickRef.current) {
-        onMapClickRef.current({
-          latitude: Number(e.lngLat.lat.toFixed(4)),
-          longitude: Number(e.lngLat.lng.toFixed(4)),
-        });
+        onMapClickRef.current({ latitude: lat, longitude: lon });
+      }
+
+      if (onCoordinateSelectRef.current) {
+        onCoordinateSelectRef.current(`${lat.toFixed(5)}, ${lon.toFixed(5)}`);
       }
     });
 
@@ -237,49 +503,43 @@ export default function MarsMap({
     }
   }, [selectedRegion, orthomosaicVisible]);
 
-  // 3. Handle Route Updates
+  // 3. Reset view signal
   useEffect(() => {
+    if (resetSignal <= 0) return;
     const map = mapRef.current;
     if (!map) return;
 
-    const source = map.getSource("active-route-source") as GeoJSONSource | undefined;
-    if (!source || !source.setData) return;
-
-    if (routeResult?.route_geometry?.points && routeResult.route_geometry.points.length > 0) {
-      // Scientifically transform each (X, Y) display point in metres back to [lon, lat]
-      const coords: [number, number][] = routeResult.route_geometry.points.map((pt) =>
-        displayPointToLonLat(pt),
-      );
-
-      source.setData({
-        type: "Feature",
-        properties: {
-          distance_m: routeResult.distance_m,
-          algorithm: routeResult.algorithm,
-        },
-        geometry: {
-          type: "LineString",
-          coordinates: coords,
-        },
-      });
-
-      // Fit map view to calculated route
-      if (coords.length > 1) {
-        const bounds = coords.reduce(
-          (acc, c) => acc.extend(c),
-          new LngLatBounds(coords[0], coords[0]),
-        );
-        map.fitBounds(bounds, { padding: 60, maxZoom: 15, duration: 1000 });
-      }
-    } else {
-      source.setData({
-        type: "FeatureCollection",
-        features: [],
+    const target = REGION_CENTERS[selectedRegion];
+    if (target) {
+      map.flyTo({
+        center: target.center,
+        zoom: target.zoom,
+        essential: true,
       });
     }
-  }, [routeResult]);
+  }, [resetSignal, selectedRegion]);
 
-  // 5. Update Start Marker
+  // 4. Update Route Line & Markers
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+
+    const routeSource = map.getSource("mars-computed-route") as GeoJSONSource | undefined;
+    const markerSource = map.getSource("mars-route-markers") as GeoJSONSource | undefined;
+
+    if (activeCoordinates.length > 0) {
+      routeSource?.setData(createRouteFeature(activeCoordinates));
+      markerSource?.setData(createRouteMarkers(activeCoordinates));
+      if (activeCoordinates.length >= 2) {
+        fitMapToRoute(map, activeCoordinates);
+      }
+    } else {
+      routeSource?.setData({ type: "FeatureCollection", features: [] });
+      markerSource?.setData({ type: "FeatureCollection", features: [] });
+    }
+  }, [activeCoordinates]);
+
+  // 5. Update HTML Start Marker
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -299,7 +559,7 @@ export default function MarsMap({
     }
   }, [startPoint]);
 
-  // 6. Update Destination Marker
+  // 6. Update HTML Destination Marker
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;

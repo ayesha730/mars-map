@@ -136,7 +136,10 @@ class DisplayPoint(BaseModel):
 
 
 class RouteGeometry(BaseModel):
-    coordinate_space: Literal["arespath_display_v1"] = "arespath_display_v1"
+    coordinate_space: Literal[
+    "arespath_display_v1",
+    "jezero_dem_native_projected_crs",
+] = "arespath_display_v1"
     points: List[DisplayPoint] = Field(...,
                                        description="Ordered waypoints in display-frame metres")
 

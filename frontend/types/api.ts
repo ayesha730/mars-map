@@ -39,7 +39,7 @@ export interface RouteResponse {
   distance_m: number;
 
   route_geometry: {
-    coordinate_space: "arespath_display_v1";
+    coordinate_space: "arespath_display_v1" | "jezero_dem_native_projected_crs" | string;
     points: RoutePoint[];
   };
 

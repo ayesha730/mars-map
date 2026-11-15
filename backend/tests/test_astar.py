@@ -17,6 +17,7 @@ Covers:
 13. Correct route reconstruction.
 14. Correct distance calculation.
 15. Real Jezero DEM integration test (skipped when dataset is absent).
+16. Optimality verification: suboptimal local path rejected for cheaper detour.
 """
 
 import math
@@ -516,4 +517,3 @@ def test_astar_suboptimal_local_path_rejected_for_cheaper_global_detour(tmp_path
         # Because it found the flat global detour, distance is < 300m and max elevation is 0.0m!
         assert res.distance_m < 300.0
         assert res.max_elevation_m == 0.0
-

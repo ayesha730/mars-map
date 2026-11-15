@@ -6,13 +6,15 @@ import {
   checkBackendHealth,
   fetchRegions,
   fetchLayers,
+  displayPointToLonLat,
 } from "@/lib/api";
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import type {
   RouteRequest,
   RouteResponse,
   RegionSummary,
   LayerCatalogueEntry,
+  MarsPoint,
 } from "@/types/api";
 
 const JEZERO_PRESETS = [
@@ -38,7 +40,16 @@ const JEZERO_PRESETS = [
   },
 ];
 
-function parseMarsCoordinate(value: string) {
+type MapSelectionTarget = "start" | "destination";
+
+type BackendStatusType = "idle" | "loading" | "success" | "error";
+
+interface BackendStatus {
+  type: BackendStatusType;
+  message: string;
+}
+
+function parseMarsCoordinate(value: string): MarsPoint | null {
   const parts = value.split(",").map((part) => Number(part.trim()));
 
   if (
@@ -71,7 +82,7 @@ export default function Home() {
   const [selectedRegion, setSelectedRegion] = useState("jezero_crater");
   const [catalogueExpanded, setCatalogueExpanded] = useState(true);
 
-  // Real backend data states
+  // Region and catalogue states
   const [regions, setRegions] = useState<RegionSummary[]>([
     {
       region_id: "jezero_crater",
@@ -103,6 +114,19 @@ export default function Home() {
   const [backendOnline, setBackendOnline] = useState(false);
   const [healthChecked, setHealthChecked] = useState(false);
 
+  // Map selection state
+  const [nextMapSelection, setNextMapSelection] = useState<MapSelectionTarget>("start");
+  const [mapCoordinate, setMapCoordinate] = useState("");
+  const [mapResetSignal, setMapResetSignal] = useState(0);
+
+  // Backend request status tracking
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>({
+    type: "idle",
+    message: "Ready to calculate a Mars surface route.",
+  });
+
+  const routeRequestInFlight = useRef(false);
+
   // Check health and load regions on mount
   useEffect(() => {
     checkBackendHealth().then((online) => {
@@ -120,7 +144,7 @@ export default function Home() {
     });
   }, []);
 
-  // Load layers when selected region changes
+  // Fetch layer catalogue whenever selected region changes
   useEffect(() => {
     if (backendOnline) {
       fetchLayers(selectedRegion)
@@ -141,17 +165,51 @@ export default function Home() {
     [regions, selectedRegion],
   );
 
+  // Convert backend route geometry into MapLibre coordinates
+  const routeMapCoordinates: [number, number][] = useMemo(() => {
+    if (!routeResult?.route_geometry?.points) return [];
+    return routeResult.route_geometry.points.map((pt) => displayPointToLonLat(pt));
+  }, [routeResult]);
+
+  // Handle coordinate selection from interactive map
   function handleMapClick(coords: { latitude: number; longitude: number }) {
+    if (routeRequestInFlight.current) return;
+
     const formatted = `${coords.latitude.toFixed(4)}, ${coords.longitude.toFixed(4)}`;
-    if (!start.trim() || (start.trim() && destination.trim())) {
+    setMapCoordinate(formatted);
+    setRouteResult(null);
+
+    if (nextMapSelection === "start") {
       setStart(formatted);
-      setDestination("");
-      setRouteResult(null);
-      setMessage(`Start point set to (${formatted}) via map click. Click again to set destination.`);
+      setNextMapSelection("destination");
+      setMessage(`Starting point set to (${formatted}). Click map again to set destination.`);
     } else {
       setDestination(formatted);
-      setMessage(`Destination set to (${formatted}) via map click. Ready to calculate route.`);
+      setNextMapSelection("start");
+      setMessage(`Destination set to (${formatted}). Ready to compute optimal route.`);
     }
+  }
+
+  function handleRegionChange(regionId: string) {
+    setSelectedRegion(regionId);
+    setMessage("");
+    setRouteResult(null);
+    setMapCoordinate("");
+    setStart("");
+    setDestination("");
+    setNextMapSelection("start");
+    setBackendStatus({
+      type: "idle",
+      message: "Region changed. Ready for a new route request.",
+    });
+  }
+
+  function resetMapView() {
+    setMapResetSignal((c) => c + 1);
+    setMapCoordinate("");
+    setRouteResult(null);
+    setNextMapSelection("start");
+    setMessage("Map selection reset. Click the map to select a starting point.");
   }
 
   async function prepareRoute() {
@@ -164,7 +222,15 @@ export default function Home() {
     }
 
     if (!startPoint || !destinationPoint) {
-      setMessage("Invalid coordinates. Use latitude, longitude in degrees (e.g. 18.4447, 77.4508).");
+      setMessage("Invalid coordinates. Use latitude (-90 to 90), longitude (-180 to 180).");
+      return;
+    }
+
+    if (
+      startPoint.latitude === destinationPoint.latitude &&
+      startPoint.longitude === destinationPoint.longitude
+    ) {
+      setMessage("Starting point and destination cannot be identical. Choose a distinct destination.");
       return;
     }
 
@@ -190,21 +256,32 @@ export default function Home() {
       routing_profile: "demonstration",
     };
 
-    try {
-      setIsLoading(true);
-      setMessage("Calculating optimal 3D terrain route using AresPath A* engine...");
+    routeRequestInFlight.current = true;
+    setIsLoading(true);
+    setBackendStatus({
+      type: "loading",
+      message: "Sending route request to AresPath A* deterministic engine...",
+    });
 
+    try {
+      setMessage("Calculating optimal 3D terrain route over verified Jezero CTX elevation grid...");
       const result = await calculateRoute(request);
       setRouteResult(result);
       setMessage(`Route calculated: ${(result.distance_m / 1000).toFixed(2)} km across Jezero terrain.`);
+      setBackendStatus({
+        type: "success",
+        message: `A* route calculated successfully (${result.route_geometry.points.length} waypoints, ${(result.distance_m / 1000).toFixed(2)} km).`,
+      });
     } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Unable to calculate route. Please try again.",
-      );
+      const errMsg = error instanceof Error ? error.message : "Unable to calculate route. Please try again.";
+      setMessage(errMsg);
+      setBackendStatus({
+        type: "error",
+        message: errMsg,
+      });
     } finally {
       setIsLoading(false);
+      routeRequestInFlight.current = false;
     }
   }
 
@@ -265,11 +342,7 @@ export default function Home() {
               <strong>SELECT MARS REGION</strong>
               <select
                 value={selectedRegion}
-                onChange={(event) => {
-                  setSelectedRegion(event.target.value);
-                  setMessage("");
-                  setRouteResult(null);
-                }}
+                onChange={(event) => handleRegionChange(event.target.value)}
                 style={{
                   width: "100%",
                   marginTop: "10px",
@@ -437,11 +510,8 @@ export default function Home() {
               <button
                 className="icon-button"
                 type="button"
-                title="Reset map view to Jezero Crater"
-                onClick={() => {
-                  setSelectedRegion("jezero_crater");
-                  setMessage("Map view recentered on Jezero Crater basin.");
-                }}
+                title="Reset map view"
+                onClick={resetMapView}
               >
                 ↗
               </button>
@@ -466,7 +536,49 @@ export default function Home() {
               startPoint={startPoint}
               destinationPoint={destinationPoint}
               onMapClick={handleMapClick}
+              resetSignal={mapResetSignal}
+              routeCoordinates={routeMapCoordinates}
             />
+
+            {/* NEXT MAP SELECTION INDICATOR */}
+            <div
+              style={{
+                position: "absolute",
+                top: "52px",
+                right: "16px",
+                zIndex: 5,
+                padding: "8px 12px",
+                background: "#17212b",
+                border: "1px solid #526779",
+                borderRadius: "6px",
+                color: "#ffffff",
+                fontSize: "11px",
+              }}
+            >
+              NEXT MAP CLICK:{" "}
+              <strong style={{ color: nextMapSelection === "start" ? "#55d69e" : "#e47777" }}>
+                {nextMapSelection === "start" ? "STARTING POINT" : "DESTINATION"}
+              </strong>
+            </div>
+
+            {mapCoordinate && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "52px",
+                  left: "16px",
+                  zIndex: 5,
+                  padding: "8px 12px",
+                  background: "#17212b",
+                  border: "1px solid #526779",
+                  borderRadius: "6px",
+                  color: "#ffffff",
+                  fontSize: "11px",
+                }}
+              >
+                LAST SELECTED: {mapCoordinate}
+              </div>
+            )}
 
             <div className="map-scale">
               <span>PROJECTION</span>
@@ -527,9 +639,11 @@ export default function Home() {
                         setStart(`${preset.lat.toFixed(4)}, ${preset.lon.toFixed(4)}`);
                         setDestination("");
                         setRouteResult(null);
+                        setNextMapSelection("destination");
                         setMessage(`Start set to ${preset.name}`);
                       } else {
                         setDestination(`${preset.lat.toFixed(4)}, ${preset.lon.toFixed(4)}`);
+                        setNextMapSelection("start");
                         setMessage(`Destination set to ${preset.name}`);
                       }
                     }}
@@ -593,12 +707,56 @@ export default function Home() {
               <span>→</span>
             </button>
 
-            {message && (
+            {/* DEDICATED BACKEND STATUS NOTIFICATION */}
+            <div
+              className={`backend-status backend-status-${backendStatus.type}`}
+              role="status"
+              aria-live="polite"
+              style={{
+                marginTop: "12px",
+                padding: "10px 12px",
+                background: "#141e28",
+                border: "1px solid #34485c",
+                borderRadius: "6px",
+                fontSize: "12px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+                <span
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    backgroundColor:
+                      backendStatus.type === "success"
+                        ? "#55d69e"
+                        : backendStatus.type === "error"
+                          ? "#e47777"
+                          : backendStatus.type === "loading"
+                            ? "#e5a35c"
+                            : "#82909f",
+                  }}
+                />
+                <strong style={{ fontSize: "11px", letterSpacing: "0.5px" }}>
+                  {backendStatus.type === "loading"
+                    ? "BACKEND REQUEST IN PROGRESS"
+                    : backendStatus.type === "success"
+                      ? "REQUEST COMPLETED"
+                      : backendStatus.type === "error"
+                        ? "BACKEND REQUEST FAILED"
+                        : "BACKEND STATUS"}
+                </strong>
+              </div>
+              <p style={{ margin: 0, color: "#a0aec0", fontSize: "11px" }}>{backendStatus.message}</p>
+            </div>
+
+            {message && message !== backendStatus.message && (
               <div className="form-message" role="status">
                 {message}
               </div>
             )}
 
+            {/* ROUTE ANALYSIS & WAYPOINT BREAKDOWN */}
             {routeResult && (
               <div className="form-message route-result" role="status">
                 <h3 style={{ color: "#55d69e", marginBottom: "8px" }}>ROUTE CALCULATED</h3>
@@ -629,6 +787,29 @@ export default function Home() {
                   <span>Coordinate Space</span>
                   <strong style={{ fontSize: "11px" }}>{routeResult.route_geometry.coordinate_space}</strong>
                 </div>
+
+                {/* WAYPOINT PREVIEW */}
+                {routeResult.route_geometry.points.length > 0 && (
+                  <div style={{ marginTop: "12px", borderTop: "1px solid #34485c", paddingTop: "8px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "6px" }}>
+                      <strong>WAYPOINT OVERVIEW</strong>
+                      <span style={{ color: "#82909f" }}>{routeResult.route_geometry.points.length} points</span>
+                    </div>
+                    <div style={{ maxHeight: "120px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "4px" }}>
+                      {routeResult.route_geometry.points.slice(0, 5).map((pt, idx) => (
+                        <div key={idx} style={{ fontSize: "10px", color: "#a0aec0", display: "flex", justifyContent: "space-between" }}>
+                          <span>Node {idx === 0 ? "1 (START)" : idx + 1}:</span>
+                          <span>X: {pt.x.toFixed(1)}m, Y: {pt.y.toFixed(1)}m</span>
+                        </div>
+                      ))}
+                      {routeResult.route_geometry.points.length > 5 && (
+                        <div style={{ fontSize: "10px", color: "#82909f", textAlign: "center", fontStyle: "italic" }}>
+                          ... and {routeResult.route_geometry.points.length - 5} intermediate waypoints ...
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {routeResult.warnings && routeResult.warnings.length > 0 && (
                   <div className="route-warning" style={{ marginTop: "10px" }}>
