@@ -8,6 +8,8 @@ the PRD standard error envelope:
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from typing import Dict, Mapping
 import uuid
 
 from fastapi import FastAPI, Request, status
@@ -16,8 +18,65 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
-from app.core.config import API_V1_STR, PROJECT_NAME, VERSION
+from app.core.config import API_V1_STR, PROJECT_NAME, VERSION, JEZERO_DEM_PATH
 from app.models.schemas import ErrorResponse, ErrorDetail
+from app.scientific.dem.service import RegionalDEM
+from app.scientific.dem.transformer import DEMTransformer
+
+
+# ---------------------------------------------------------------------------
+# Lifespan: DEM resource initialization and shutdown cleanup
+# ---------------------------------------------------------------------------
+
+def init_regional_dems() -> Dict[str, RegionalDEM]:
+    """
+    Initializes RegionalDEM instances for configured supported regions.
+    Only returns when all available configured resources initialize cleanly.
+    If an initialization failure occurs, all previously opened resources
+    are immediately closed and the error is propagated.
+    """
+    opened: Dict[str, RegionalDEM] = {}
+    try:
+        # Load Jezero CTX DEM if present on disk
+        if JEZERO_DEM_PATH.exists():
+            tf = DEMTransformer.from_file(JEZERO_DEM_PATH)
+            opened["jezero_crater"] = RegionalDEM(region_id="jezero_crater", transformer=tf)
+        return opened
+    except Exception as exc:
+        # Clean up any opened resources before propagating failure
+        for entry in opened.values():
+            if entry.transformer and not entry.transformer.is_closed:
+                try:
+                    entry.transformer.close()
+                except Exception:
+                    pass
+        raise RuntimeError(f"Failed to initialize regional DEM resources: {exc}") from exc
+
+
+def close_regional_dems(dems: Mapping[str, RegionalDEM]) -> None:
+    """
+    Safely closes all owned DEM transformers on application shutdown.
+    Handles cleanup failures individually so all resources are attempted.
+    """
+    for entry in dems.values():
+        if entry.transformer and not entry.transformer.is_closed:
+            try:
+                entry.transformer.close()
+            except Exception:
+                pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize regional DEMs
+    app.state.regional_dems = {}
+    loaded = init_regional_dems()
+    app.state.regional_dems = loaded
+    yield
+    # Shutdown: Close all owned DEM transformers
+    close_regional_dems(getattr(app.state, "regional_dems", {}))
+    app.state.regional_dems = {}
+
 
 # ---------------------------------------------------------------------------
 # Application
@@ -26,6 +85,7 @@ from app.models.schemas import ErrorResponse, ErrorDetail
 app = FastAPI(
     title=PROJECT_NAME,
     version=VERSION,
+    lifespan=lifespan,
     description=(
         "AresPath — NASA Space Apps Challenge 2026 Mars surface routing API.\n\n"
         "**Coordinate convention**: Mars, planetocentric latitude, "

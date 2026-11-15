@@ -7,6 +7,16 @@ dependencies = [
     "uvicorn[standard]",
     "pydantic",
     "rasterio>=1.4.0",
+    "numpy",
+    "affine",
+    "pillow",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
 ]
 
 [tool.pytest.ini_options]

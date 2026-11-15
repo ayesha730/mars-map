@@ -91,11 +91,24 @@ async def test_region_datasets_are_explicit_about_synthetic():
 
 @pytest.mark.asyncio
 async def test_region_routing_unavailable_has_reason():
+    """Gale crater has no routing dataset integrated; routing must be unavailable with a reason."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE) as ac:
-        r = await ac.get("/api/v1/regions/jezero_crater")
+        r = await ac.get("/api/v1/regions/gale_crater")
     data = r.json()
     assert data["routing_available"] is False
     assert data["routing_unavailable_reason"] is not None
+
+
+@pytest.mark.asyncio
+async def test_jezero_routing_available():
+    """Jezero crater has verified DEM integrated; routing must be available when initialized."""
+    from app.main import lifespan
+    async with lifespan(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE) as ac:
+            r = await ac.get("/api/v1/regions/jezero_crater")
+        data = r.json()
+        assert data["routing_available"] is True
+        assert data["routing_unavailable_reason"] is None
 
 
 @pytest.mark.asyncio

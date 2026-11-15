@@ -4,11 +4,19 @@ import { useEffect, useRef } from "react";
 import {
   Map as MapLibreMap,
   NavigationControl,
+  Marker,
+  LngLatBounds,
   setWorkerUrl,
+  GeoJSONSource,
 } from "maplibre-gl";
-
 import "maplibre-gl/dist/maplibre-gl.css";
+import {
+  displayPointToLonLat,
+  getRasterPreviewUrl,
+} from "@/lib/api";
+import type { RouteResponse } from "@/types/api";
 
+// Configure MapLibre web worker for Next.js
 setWorkerUrl(
   new URL(
     "maplibre-gl/dist/maplibre-gl-worker.mjs",
@@ -16,124 +24,73 @@ setWorkerUrl(
   ).toString(),
 );
 
-type MarsMapProps = {
-  selectedRegion: string;
-  resetSignal: number;
-  onCoordinateSelect: (coordinate: string) => void;
+// Jezero Crater Orthomosaic coverage bounds (USGS/JPL TRN product)
+export const JEZERO_ORTHO_BOUNDS = {
+  min_lon: 77.1605,
+  min_lat: 18.2110,
+  max_lon: 77.6992,
+  max_lat: 18.7212,
 };
 
-type GridFeature = {
-  type: "Feature";
-  properties: Record<string, never>;
-  geometry: {
-    type: "LineString";
-    coordinates: number[][];
-  };
+export const REGION_CENTERS: Record<string, { center: [number, number]; zoom: number }> = {
+  jezero_crater: { center: [77.43, 18.45], zoom: 11 },
+  gale_crater: { center: [137.4, -4.6], zoom: 10 },
 };
 
-const REGION_VIEWS: Record<
-  string,
-  { center: [number, number]; zoom: number }
-> = {
-  jezero_crater: {
-    center: [77.4, 18.48],
-    zoom: 5,
-  },
-  gale_crater: {
-    center: [137.4, -5.4],
-    zoom: 5,
-  },
-};
-
-function createGrid() {
-  const features: GridFeature[] = [];
-
-  // Latitude lines
-  for (let latitude = -80; latitude <= 80; latitude += 10) {
-    const coordinates: number[][] = [];
-
-    for (let longitude = -180; longitude <= 180; longitude += 5) {
-      coordinates.push([longitude, latitude]);
-    }
-
-    features.push({
-      type: "Feature",
-      properties: {},
-      geometry: {
-        type: "LineString",
-        coordinates,
-      },
-    });
-  }
-
-  // Longitude lines
-  for (let longitude = -180; longitude <= 180; longitude += 10) {
-    const coordinates: number[][] = [];
-
-    for (let latitude = -80; latitude <= 80; latitude += 5) {
-      coordinates.push([longitude, latitude]);
-    }
-
-    features.push({
-      type: "Feature",
-      properties: {},
-      geometry: {
-        type: "LineString",
-        coordinates,
-      },
-    });
-  }
-
-  return {
-    type: "FeatureCollection" as const,
-    features,
-  };
+export interface MarsMapProps {
+  selectedRegion?: string;
+  orthomosaicVisible?: boolean;
+  routeResult?: RouteResponse | null;
+  startPoint?: { latitude: number; longitude: number } | null;
+  destinationPoint?: { latitude: number; longitude: number } | null;
+  onMapClick?: (coords: { latitude: number; longitude: number }) => void;
 }
 
-function createRegionMarkers() {
-  return {
-    type: "FeatureCollection" as const,
-    features: [
-      {
-        type: "Feature" as const,
-        properties: { name: "Jezero Crater" },
-        geometry: {
-          type: "Point" as const,
-          coordinates: [77.4, 18.48],
-        },
-      },
-      {
-        type: "Feature" as const,
-        properties: { name: "Gale Crater" },
-        geometry: {
-          type: "Point" as const,
-          coordinates: [137.4, -5.4],
-        },
-      },
-    ],
-  };
+function createMarkerElement(label: string, color: string, title: string): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = "ares-map-marker";
+  el.title = title;
+  el.style.width = "28px";
+  el.style.height = "28px";
+  el.style.borderRadius = "50%";
+  el.style.backgroundColor = color;
+  el.style.color = "#0b121a";
+  el.style.display = "flex";
+  el.style.alignItems = "center";
+  el.style.justifyContent = "center";
+  el.style.fontWeight = "800";
+  el.style.fontSize = "13px";
+  el.style.border = "2px solid #ffffff";
+  el.style.boxShadow = "0 2px 8px rgba(0,0,0,0.6)";
+  el.style.cursor = "pointer";
+  el.innerText = label;
+  return el;
 }
 
 export default function MarsMap({
-  selectedRegion,
-  resetSignal,
-  onCoordinateSelect,
+  selectedRegion = "jezero_crater",
+  orthomosaicVisible = true,
+  routeResult = null,
+  startPoint = null,
+  destinationPoint = null,
+  onMapClick,
 }: MarsMapProps) {
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const onCoordinateSelectRef = useRef(onCoordinateSelect);
+  const startMarkerRef = useRef<Marker | null>(null);
+  const destMarkerRef = useRef<Marker | null>(null);
+  const onMapClickRef = useRef(onMapClick);
 
-  // Keep the latest callback without recreating the map.
   useEffect(() => {
-    onCoordinateSelectRef.current = onCoordinateSelect;
-  }, [onCoordinateSelect]);
+    onMapClickRef.current = onMapClick;
+  }, [onMapClick]);
 
-  // Create the map once.
+  // 1. Initialize Map
   useEffect(() => {
     if (!mapContainer.current || mapRef.current) return;
 
-    const initialView =
-      REGION_VIEWS[selectedRegion] ?? REGION_VIEWS.jezero_crater;
+    const initialCenter = REGION_CENTERS[selectedRegion]?.center || [77.43, 18.45];
+    const initialZoom = REGION_CENTERS[selectedRegion]?.zoom || 11;
 
     const map = new MapLibreMap({
       container: mapContainer.current,
@@ -142,23 +99,21 @@ export default function MarsMap({
         sources: {},
         layers: [
           {
-            id: "mars-background",
+            id: "mars-basemap",
             type: "background",
             paint: {
-              "background-color": "#101923",
+              "background-color": "#0b121a",
             },
           },
         ],
       },
-      center: initialView.center,
-      zoom: initialView.zoom,
-      minZoom: 1,
-      maxZoom: 12,
+      center: initialCenter,
+      zoom: initialZoom,
+      minZoom: 2,
+      maxZoom: 18,
       renderWorldCopies: false,
       attributionControl: false,
     });
-
-    mapRef.current = map;
 
     map.addControl(
       new NavigationControl({
@@ -169,99 +124,209 @@ export default function MarsMap({
       "bottom-right",
     );
 
-    // Add coordinate grid and region markers after map loads.
     map.on("load", () => {
-      map.addSource("mars-coordinate-grid", {
-        type: "geojson",
-        data: createGrid(),
+      // Add Jezero CTX Orthomosaic raster image source
+      const previewUrl = getRasterPreviewUrl("jezero_ctx_orthomosaic_6m", {
+        ...JEZERO_ORTHO_BOUNDS,
+        max_dimension: 2048,
+      });
+
+      map.addSource("jezero-ortho-source", {
+        type: "image",
+        url: previewUrl,
+        coordinates: [
+          [JEZERO_ORTHO_BOUNDS.min_lon, JEZERO_ORTHO_BOUNDS.max_lat], // Top-Left
+          [JEZERO_ORTHO_BOUNDS.max_lon, JEZERO_ORTHO_BOUNDS.max_lat], // Top-Right
+          [JEZERO_ORTHO_BOUNDS.max_lon, JEZERO_ORTHO_BOUNDS.min_lat], // Bottom-Right
+          [JEZERO_ORTHO_BOUNDS.min_lon, JEZERO_ORTHO_BOUNDS.min_lat], // Bottom-Left
+        ],
       });
 
       map.addLayer({
-        id: "mars-grid-lines",
-        type: "line",
-        source: "mars-coordinate-grid",
-        paint: {
-          "line-color": "#526779",
-          "line-width": 1,
-          "line-opacity": 0.35,
-          "line-dasharray": [2, 3],
-        },
-      });
-
-      map.addSource("mars-region-marker", {
-        type: "geojson",
-        data: createRegionMarkers(),
-      });
-
-      map.addLayer({
-        id: "mars-region-points",
-        type: "circle",
-        source: "mars-region-marker",
-        paint: {
-          "circle-radius": 7,
-          "circle-color": "#e5a35c",
-          "circle-stroke-color": "#fff0d4",
-          "circle-stroke-width": 2,
-        },
-      });
-
-      map.addLayer({
-        id: "mars-region-labels",
-        type: "symbol",
-        source: "mars-region-marker",
+        id: "jezero-ortho-layer",
+        type: "raster",
+        source: "jezero-ortho-source",
         layout: {
-          "text-field": ["get", "name"],
-          "text-size": 11,
-          "text-offset": [0, 1.7],
-          "text-anchor": "top",
+          visibility: orthomosaicVisible && selectedRegion === "jezero_crater" ? "visible" : "none",
         },
         paint: {
-          "text-color": "#f1c58e",
-          "text-halo-color": "#101923",
-          "text-halo-width": 2,
+          "raster-opacity": 0.95,
+          "raster-fade-duration": 0,
+        },
+      });
+
+      // Add GeoJSON route line source
+      map.addSource("active-route-source", {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection",
+          features: [],
+        },
+      });
+
+      // Route casing for contrast against terrain imagery
+      map.addLayer({
+        id: "active-route-casing",
+        type: "line",
+        source: "active-route-source",
+        layout: {
+          "line-cap": "round",
+          "line-join": "round",
+        },
+        paint: {
+          "line-color": "#0b121a",
+          "line-width": 6,
+          "line-opacity": 0.85,
+        },
+      });
+
+      // Active route line in bright mission green
+      map.addLayer({
+        id: "active-route-line",
+        type: "line",
+        source: "active-route-source",
+        layout: {
+          "line-cap": "round",
+          "line-join": "round",
+        },
+        paint: {
+          "line-color": "#55d69e",
+          "line-width": 3.5,
+          "line-opacity": 1.0,
         },
       });
     });
 
-    // Clicking the map selects a starting coordinate.
-    map.on("click", (event) => {
-      const latitude = event.lngLat.lat;
-      const longitude = event.lngLat.lng;
-
-      onCoordinateSelectRef.current(
-        `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
-      );
+    // Map click handler
+    map.on("click", (e) => {
+      if (onMapClickRef.current) {
+        onMapClickRef.current({
+          latitude: Number(e.lngLat.lat.toFixed(4)),
+          longitude: Number(e.lngLat.lng.toFixed(4)),
+        });
+      }
     });
+
+    map.getCanvas().style.cursor = "crosshair";
+    mapRef.current = map;
 
     return () => {
       map.remove();
       mapRef.current = null;
     };
-    // The map is created once. View changes are handled below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Move to the selected region or reset the current view.
+  // 2. Handle Region & Orthomosaic Layer Visibility
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const view =
-      REGION_VIEWS[selectedRegion] ?? REGION_VIEWS.jezero_crater;
+    const target = REGION_CENTERS[selectedRegion];
+    if (target) {
+      map.flyTo({
+        center: target.center,
+        zoom: target.zoom,
+        essential: true,
+      });
+    }
 
-    map.flyTo({
-      center: view.center,
-      zoom: view.zoom,
-      duration: resetSignal > 0 ? 900 : 1400,
-      essential: true,
-    });
-  }, [selectedRegion, resetSignal]);
+    if (map.getLayer("jezero-ortho-layer")) {
+      const isVisible = orthomosaicVisible && selectedRegion === "jezero_crater";
+      map.setLayoutProperty("jezero-ortho-layer", "visibility", isVisible ? "visible" : "none");
+    }
+  }, [selectedRegion, orthomosaicVisible]);
+
+  // 3. Handle Route Updates
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const source = map.getSource("active-route-source") as GeoJSONSource | undefined;
+    if (!source || !source.setData) return;
+
+    if (routeResult?.route_geometry?.points && routeResult.route_geometry.points.length > 0) {
+      // Scientifically transform each (X, Y) display point in metres back to [lon, lat]
+      const coords: [number, number][] = routeResult.route_geometry.points.map((pt) =>
+        displayPointToLonLat(pt),
+      );
+
+      source.setData({
+        type: "Feature",
+        properties: {
+          distance_m: routeResult.distance_m,
+          algorithm: routeResult.algorithm,
+        },
+        geometry: {
+          type: "LineString",
+          coordinates: coords,
+        },
+      });
+
+      // Fit map view to calculated route
+      if (coords.length > 1) {
+        const bounds = coords.reduce(
+          (acc, c) => acc.extend(c),
+          new LngLatBounds(coords[0], coords[0]),
+        );
+        map.fitBounds(bounds, { padding: 60, maxZoom: 15, duration: 1000 });
+      }
+    } else {
+      source.setData({
+        type: "FeatureCollection",
+        features: [],
+      });
+    }
+  }, [routeResult]);
+
+  // 5. Update Start Marker
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (startPoint) {
+      if (!startMarkerRef.current) {
+        const el = createMarkerElement("A", "#55d69e", "Start Point");
+        startMarkerRef.current = new Marker({ element: el })
+          .setLngLat([startPoint.longitude, startPoint.latitude])
+          .addTo(map);
+      } else {
+        startMarkerRef.current.setLngLat([startPoint.longitude, startPoint.latitude]);
+      }
+    } else if (startMarkerRef.current) {
+      startMarkerRef.current.remove();
+      startMarkerRef.current = null;
+    }
+  }, [startPoint]);
+
+  // 6. Update Destination Marker
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (destinationPoint) {
+      if (!destMarkerRef.current) {
+        const el = createMarkerElement("B", "#e47777", "Destination");
+        destMarkerRef.current = new Marker({ element: el })
+          .setLngLat([destinationPoint.longitude, destinationPoint.latitude])
+          .addTo(map);
+      } else {
+        destMarkerRef.current.setLngLat([
+          destinationPoint.longitude,
+          destinationPoint.latitude,
+        ]);
+      }
+    } else if (destMarkerRef.current) {
+      destMarkerRef.current.remove();
+      destMarkerRef.current = null;
+    }
+  }, [destinationPoint]);
 
   return (
     <div
       ref={mapContainer}
       className="mars-map-canvas"
-      aria-label="Interactive Mars coordinate workspace"
+      aria-label="Interactive planetary map workspace"
     />
   );
 }
