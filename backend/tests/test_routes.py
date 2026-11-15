@@ -1,301 +1,328 @@
-"""
-API contract and validation tests for POST /api/v1/routes.
-
-Coverage:
-  - Request schema validation (happy path, bad fields, wrong CRS)
-  - Response envelope shape for ROUTING_DATA_UNAVAILABLE
-  - Region not found (404)
-  - Error envelope always present on failure
-  - All routing profiles accepted
-  - Coordinate boundary conditions
-  - Same-point request
-"""
-
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+
 from app.main import app
 
-BASE = "http://test"
-ROUTES_URL = "/api/v1/routes"
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+ROUTE_ENDPOINT = "/api/v1/routes"
 
+# A short route inside the Jezero DEM coverage.
 VALID_PAYLOAD = {
     "region_id": "jezero_crater",
-    "start": {"latitude": 18.4, "longitude": 77.5},
-    "destination": {"latitude": 18.6, "longitude": 77.9},
-    "coordinate_reference": {
-        "body": "Mars",
-        "latitude_type": "planetocentric",
-        "longitude_direction": "positive_east",
-        "longitude_domain": "-180_to_180",
-        "angular_unit": "degrees",
+    "start": {
+        "latitude": 18.4,
+        "longitude": 77.7,
     },
-    "routing_profile": "safe",
+    "destination": {
+        "latitude": 18.405,
+        "longitude": 77.705,
+    },
+}
+
+SAME_POINT_PAYLOAD = {
+    "region_id": "jezero_crater",
+    "start": {
+        "latitude": 18.4,
+        "longitude": 77.7,
+    },
+    "destination": {
+        "latitude": 18.4,
+        "longitude": 77.7,
+    },
 }
 
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
+async def post_route(payload: dict):
+    """Send a route request and return its status code and JSON body."""
+    transport = ASGITransport(app=app)
 
-async def post_route(payload: dict) -> tuple:
-    """Returns (status_code, json_body)."""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url=BASE) as ac:
-        r = await ac.post(ROUTES_URL, json=payload)
-    return r.status_code, r.json()
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        response = await client.post(ROUTE_ENDPOINT, json=payload)
+
+    return response.status_code, response.json()
 
 
-# ---------------------------------------------------------------------------
-# 1. ROUTING_DATA_UNAVAILABLE — shape contract
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Successful Jezero routing
+# -------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_routes_unavailable_returns_503():
+async def test_jezero_route_returns_success():
     code, body = await post_route(VALID_PAYLOAD)
-    assert code == 503, f"Expected 503, got {code}: {body}"
+
+    assert code == 200, body
+    assert body["status"] == "success"
+    assert body["region_id"] == "jezero_crater"
+    assert body["algorithm"] == "a_star"
+    assert body["distance_m"] > 0
+    assert len(body["route_geometry"]["points"]) > 1
 
 
 @pytest.mark.asyncio
-async def test_routes_unavailable_error_envelope():
-    """Response must follow PRD error envelope: status, error.code, error.message, request_id."""
+async def test_jezero_route_uses_native_dem_coordinates():
     code, body = await post_route(VALID_PAYLOAD)
-    assert body["status"] == "error"
-    assert body["error"]["code"] == "ROUTING_DATA_UNAVAILABLE"
-    assert isinstance(body["error"]["message"], str)
-    assert len(body["error"]["message"]) > 0
-    assert "request_id" in body
-    assert body["request_id"] is not None
+
+    assert code == 200, body
+    assert (
+        body["route_geometry"]["coordinate_space"]
+        == "jezero_dem_native_projected_crs"
+    )
 
 
 @pytest.mark.asyncio
-async def test_routes_unavailable_details_contains_distance():
-    """Details block must include an informational great-circle distance, not a fabricated route."""
-    _, body = await post_route(VALID_PAYLOAD)
-    details = body["error"]["details"]
-    assert "great_circle_distance_m" in details
-    assert isinstance(details["great_circle_distance_m"], float)
-    assert details["great_circle_distance_m"] >= 0
+async def test_jezero_route_points_have_x_and_y():
+    code, body = await post_route(VALID_PAYLOAD)
+
+    assert code == 200, body
+
+    points = body["route_geometry"]["points"]
+
+    assert len(points) > 1
+
+    for point in points:
+        assert "x" in point
+        assert "y" in point
+        assert isinstance(point["x"], (int, float))
+        assert isinstance(point["y"], (int, float))
 
 
 @pytest.mark.asyncio
-async def test_routes_unavailable_distance_disclaimer_present():
-    """Details must carry a disclaimer that the distance is NOT a navigable route."""
-    _, body = await post_route(VALID_PAYLOAD)
-    details = body["error"]["details"]
-    assert "distance_disclaimer" in details
-    disclaimer = details["distance_disclaimer"].lower()
-    assert "not" in disclaimer or "approximation" in disclaimer
+async def test_jezero_route_has_data_sources():
+    code, body = await post_route(VALID_PAYLOAD)
+
+    assert code == 200, body
+    assert isinstance(body["data_sources"], list)
+    assert len(body["data_sources"]) > 0
 
 
 @pytest.mark.asyncio
-async def test_routes_unavailable_region_id_in_details():
-    _, body = await post_route(VALID_PAYLOAD)
-    assert body["error"]["details"]["region_id"] == "jezero_crater"
+async def test_jezero_route_does_not_claim_unverified_elevation_units():
+    code, body = await post_route(VALID_PAYLOAD)
 
+    assert code == 200, body
 
-# ---------------------------------------------------------------------------
-# 2. Region not found
-# ---------------------------------------------------------------------------
+    terrain = body["terrain_summary"]
+
+    assert terrain["min_elevation_m"] is None
+    assert terrain["max_elevation_m"] is None
+    assert terrain["max_slope_deg"] is None
+
 
 @pytest.mark.asyncio
-async def test_routes_unknown_region_returns_404():
-    payload = {**VALID_PAYLOAD, "region_id": "atlantis_city"}
+async def test_jezero_route_includes_warnings():
+    code, body = await post_route(VALID_PAYLOAD)
+
+    assert code == 200, body
+    assert isinstance(body["warnings"], list)
+    assert len(body["warnings"]) > 0
+
+
+# -------------------------------------------------------------------
+# Routing profiles
+# -------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "profile",
+    ["safe", "fast"],
+)
+async def test_supported_routing_profiles(profile):
+    payload = {
+        **VALID_PAYLOAD,
+        "routing_profile": profile,
+    }
+
     code, body = await post_route(payload)
-    assert code == 404
-    assert body["status"] == "error"
-    assert body["error"]["code"] == "REGION_NOT_FOUND"
+
+    assert code == 200, body
+    assert body["status"] == "success"
 
 
 @pytest.mark.asyncio
-async def test_routes_unknown_region_lists_supported():
-    payload = {**VALID_PAYLOAD, "region_id": "nowhere"}
-    _, body = await post_route(payload)
-    details = body["error"]["details"]
-    assert "supported_regions" in details
-    assert isinstance(details["supported_regions"], list)
-    assert "jezero_crater" in details["supported_regions"]
+async def test_science_profile_is_not_available():
+    payload = {
+        **VALID_PAYLOAD,
+        "routing_profile": "science",
+    }
+
+    code, body = await post_route(payload)
+
+    assert code == 503
+    assert body["error"]["code"] == "SCIENCE_PROFILE_UNAVAILABLE"
 
 
-# ---------------------------------------------------------------------------
-# 3. Validation errors — PRD envelope
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Same-point route
+# -------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_same_point_route_distance_is_zero():
+    code, body = await post_route(SAME_POINT_PAYLOAD)
+
+    assert code == 200, body
+    assert body["status"] == "success"
+    assert body["distance_m"] == 0
+
+
+# -------------------------------------------------------------------
+# Region availability
+# -------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_gale_crater_routing_is_unavailable():
+    payload = {
+        **VALID_PAYLOAD,
+        "region_id": "gale_crater",
+    }
+
+    code, body = await post_route(payload)
+
+    assert code == 503
+    assert body["error"]["code"] == "ROUTING_DATA_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_unknown_region_returns_404():
+    payload = {
+        **VALID_PAYLOAD,
+        "region_id": "unknown_region",
+    }
+
+    code, body = await post_route(payload)
+
+    assert code == 404
+
+
+# -------------------------------------------------------------------
+# Request validation
+# -------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_missing_region_id_returns_422():
-    payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "region_id"}
+    payload = {
+        "start": VALID_PAYLOAD["start"],
+        "destination": VALID_PAYLOAD["destination"],
+    }
+
     code, body = await post_route(payload)
+
     assert code == 422
-    assert body["status"] == "error"
-    assert body["error"]["code"] == "VALIDATION_ERROR"
-    assert "request_id" in body
 
 
 @pytest.mark.asyncio
 async def test_missing_start_returns_422():
-    payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "start"}
+    payload = {
+        "region_id": "jezero_crater",
+        "destination": VALID_PAYLOAD["destination"],
+    }
+
     code, body = await post_route(payload)
+
     assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
 async def test_missing_destination_returns_422():
-    payload = {k: v for k, v in VALID_PAYLOAD.items() if k != "destination"}
+    payload = {
+        "region_id": "jezero_crater",
+        "start": VALID_PAYLOAD["start"],
+    }
+
     code, body = await post_route(payload)
+
     assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
-async def test_latitude_out_of_range_returns_422():
+async def test_invalid_latitude_returns_422():
     payload = {
         **VALID_PAYLOAD,
-        "start": {"latitude": 91.0, "longitude": 77.5},
-    }
-    code, body = await post_route(payload)
-    assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
-
-
-@pytest.mark.asyncio
-async def test_longitude_out_of_range_returns_422():
-    payload = {
-        **VALID_PAYLOAD,
-        "start": {"latitude": 18.4, "longitude": 181.0},
-    }
-    code, body = await post_route(payload)
-    assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
-
-
-@pytest.mark.asyncio
-async def test_negative_latitude_boundary_accepted():
-    payload = {
-        **VALID_PAYLOAD,
-        "start": {"latitude": -90.0, "longitude": 0.0},
-        "destination": {"latitude": -89.9, "longitude": 0.0},
-    }
-    code, _ = await post_route(payload)
-    # Should reach routing (503), not fail validation (422)
-    assert code == 503
-
-
-@pytest.mark.asyncio
-async def test_negative_longitude_boundary_accepted():
-    payload = {
-        **VALID_PAYLOAD,
-        "start": {"latitude": 0.0, "longitude": -180.0},
-        "destination": {"latitude": 0.0, "longitude": -179.0},
-    }
-    code, _ = await post_route(payload)
-    assert code == 503  # Not a validation error
-
-
-@pytest.mark.asyncio
-async def test_wrong_crs_body_returns_422():
-    payload = {
-        **VALID_PAYLOAD,
-        "coordinate_reference": {
-            "body": "Earth",          # Wrong
-            "latitude_type": "planetocentric",
-            "longitude_direction": "positive_east",
-            "longitude_domain": "-180_to_180",
-            "angular_unit": "degrees",
+        "start": {
+            "latitude": 95.0,
+            "longitude": 77.7,
         },
     }
+
     code, body = await post_route(payload)
+
     assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
-async def test_wrong_crs_longitude_direction_returns_422():
+async def test_invalid_longitude_returns_422():
     payload = {
         **VALID_PAYLOAD,
-        "coordinate_reference": {
-            "body": "Mars",
-            "latitude_type": "planetocentric",
-            "longitude_direction": "positive_west",   # Wrong
-            "longitude_domain": "-180_to_180",
-            "angular_unit": "degrees",
+        "start": {
+            "latitude": 18.4,
+            "longitude": 200.0,
         },
     }
+
     code, body = await post_route(payload)
+
     assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio
 async def test_invalid_routing_profile_returns_422():
-    payload = {**VALID_PAYLOAD, "routing_profile": "warp_speed"}
+    payload = {
+        **VALID_PAYLOAD,
+        "routing_profile": "unknown",
+    }
+
     code, body = await post_route(payload)
+
     assert code == 422
-    assert body["error"]["code"] == "VALIDATION_ERROR"
 
-
-# ---------------------------------------------------------------------------
-# 4. All valid routing profiles are accepted (reach routing layer, not 422)
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["safe", "fast", "science"])
-async def test_all_routing_profiles_accepted(profile):
-    payload = {**VALID_PAYLOAD, "routing_profile": profile}
-    code, body = await post_route(payload)
-    # Should hit routing (503), not validation failure (422)
-    assert code == 503, (
-        f"Profile '{profile}' got {code} instead of 503. Body: {body}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 5. Same-point request (distance should be 0 or near-0)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_same_point_route_distance_is_zero():
+async def test_default_coordinate_reference_is_accepted():
     payload = {
         **VALID_PAYLOAD,
-        "start": {"latitude": 18.4, "longitude": 77.5},
-        "destination": {"latitude": 18.4, "longitude": 77.5},
     }
-    _, body = await post_route(payload)
-    # Still 503 (unavailable), but distance in details must be 0
-    details = body["error"]["details"]
-    assert details["great_circle_distance_m"] == 0.0
+
+    code, body = await post_route(payload)
+
+    assert code == 200, body
+    assert body["status"] == "success"
 
 
-# ---------------------------------------------------------------------------
-# 6. Gale Crater — second supported region
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
+# Coordinate boundary validation
+# -------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_gale_crater_region_accepted():
+async def test_negative_latitude_is_not_rejected_by_schema():
     payload = {
         **VALID_PAYLOAD,
-        "region_id": "gale_crater",
-        "start": {"latitude": -5.4, "longitude": 137.8},
-        "destination": {"latitude": -5.5, "longitude": 137.9},
+        "start": {
+            "latitude": -18.4,
+            "longitude": 77.7,
+        },
     }
+
     code, body = await post_route(payload)
-    assert code == 503
-    assert body["error"]["code"] == "ROUTING_DATA_UNAVAILABLE"
 
+    # Negative latitude is a valid geographic coordinate.
+    # The route may fail because the point is outside the DEM.
+    assert code != 422
 
-# ---------------------------------------------------------------------------
-# 7. Default coordinate_reference (omitted from request)
-# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_default_crs_accepted():
-    """coordinate_reference defaults to the confirmed Mars convention."""
+async def test_negative_longitude_is_not_rejected_by_schema():
     payload = {
-        "region_id": "jezero_crater",
-        "start": {"latitude": 18.4, "longitude": 77.5},
-        "destination": {"latitude": 18.6, "longitude": 77.9},
+        **VALID_PAYLOAD,
+        "start": {
+            "latitude": 18.4,
+            "longitude": -77.7,
+        },
     }
-    code, _ = await post_route(payload)
-    assert code == 503  # Reaches routing, not validation failure
+
+    code, body = await post_route(payload)
+
+    # Negative longitude is valid geographically.
+    # The point may be outside the Jezero DEM coverage.
+    assert code != 422

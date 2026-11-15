@@ -34,6 +34,35 @@ type BackendStatus = {
   message: string;
 };
 
+// Jezero DEM projection parameters.
+const MARS_RADIUS_M = 3396190;
+const JEZERO_STANDARD_PARALLEL_DEG = 18.4663;
+
+/**
+ * Convert native Jezero DEM equirectangular projected coordinates
+ * into MapLibre longitude/latitude coordinates.
+ *
+ * Input X/Y are projected coordinates in the DEM's native CRS.
+ * Output is [longitude, latitude] in degrees.
+ */
+function projectedToMarsLonLat(
+  x: number,
+  y: number,
+): [number, number] {
+  const standardParallel =
+    (JEZERO_STANDARD_PARALLEL_DEG * Math.PI) / 180;
+
+  const longitude =
+    (x / (MARS_RADIUS_M * Math.cos(standardParallel))) *
+    (180 / Math.PI);
+
+  const latitude =
+    (y / MARS_RADIUS_M) *
+    (180 / Math.PI);
+
+  return [longitude, latitude];
+}
+
 function parseMarsCoordinate(value: string): MarsCoordinate | null {
   const parts = value.split(",");
 
@@ -77,20 +106,20 @@ function getLayerColor(type: MarsLayer["layer_type"]): string {
 }
 
 export default function Home() {
-  // Region state
+  // Region state.
   const [regions, setRegions] = useState<MarsRegion[]>([]);
   const [selectedRegion, setSelectedRegion] =
     useState("jezero_crater");
   const [regionsLoading, setRegionsLoading] = useState(true);
   const [regionError, setRegionError] = useState("");
 
-  // Interactive map state
+  // Interactive map state.
   const [mapResetSignal, setMapResetSignal] = useState(0);
   const [mapCoordinate, setMapCoordinate] = useState("");
   const [nextMapSelection, setNextMapSelection] =
     useState<MapSelectionTarget>("start");
 
-  // Layer catalogue state
+  // Layer catalogue state.
   const [layers, setLayers] = useState<LayerView[]>([]);
   const [catalogue, setCatalogue] =
     useState<LayersResponse | null>(null);
@@ -98,29 +127,38 @@ export default function Home() {
   const [layerError, setLayerError] = useState("");
   const [catalogueExpanded, setCatalogueExpanded] = useState(true);
 
-  // Backend state
+  // Backend state.
   const [backendOnline, setBackendOnline] = useState(false);
   const [healthChecked, setHealthChecked] = useState(false);
 
-  // Route planner state
-  const [start, setStart] = useState("");
-  const [destination, setDestination] = useState("");
+  // Route planner state.
+  // Route planner state.
+  const [start, setStart] = useState("18.3, 77.2");
+  const [destination, setDestination] = useState("18.5, 77.4");
   const [message, setMessage] = useState("");
   const [routeResult, setRouteResult] =
     useState<RouteResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Dedicated backend request status
+  // Dedicated backend request status.
   const [backendStatus, setBackendStatus] =
     useState<BackendStatus>({
       type: "idle",
       message: "Ready to calculate a Mars surface route.",
     });
 
-  // Synchronous lock to prevent duplicate route requests.
+  // Prevent duplicate route requests.
   const routeRequestInFlight = useRef(false);
 
-  // Check backend and fetch available regions
+  // Convert backend route geometry into MapLibre coordinates.
+  // Backend points are in native DEM projected X/Y coordinates,
+  // not longitude/latitude.
+  const routeMapCoordinates: [number, number][] =
+    routeResult?.route_geometry.points.map((point) =>
+      projectedToMarsLonLat(point.x, point.y)
+    ) ?? [];
+
+  // Check backend and fetch available regions.
   useEffect(() => {
     let active = true;
 
@@ -174,7 +212,7 @@ export default function Home() {
     };
   }, []);
 
-  // Fetch layer catalogue whenever selected region changes
+  // Fetch layer catalogue whenever selected region changes.
   useEffect(() => {
     if (!selectedRegion) {
       setLayers([]);
@@ -225,7 +263,7 @@ export default function Home() {
     };
   }, [selectedRegion]);
 
-  // Toggle layer selection
+  // Toggle layer selection.
   function toggleLayer(id: string) {
     setLayers((current) =>
       current.map((layer) =>
@@ -236,7 +274,7 @@ export default function Home() {
     );
   }
 
-  // Change selected region
+  // Change selected region.
   function handleRegionChange(regionId: string) {
     setSelectedRegion(regionId);
     setMessage("");
@@ -253,7 +291,7 @@ export default function Home() {
     });
   }
 
-  // Handle coordinate selection from map
+  // Handle coordinate selection from map.
   function handleMapCoordinateSelect(coordinate: string) {
     if (routeRequestInFlight.current) return;
 
@@ -275,24 +313,25 @@ export default function Home() {
     }
   }
 
-  // Reset map view and selection
+  // Reset map view and selection.
   function resetMapView() {
     setMapResetSignal((current) => current + 1);
     setMapCoordinate("");
+    setRouteResult(null);
     setNextMapSelection("start");
+
     setMessage(
       "Map selection reset. Click the map to select a starting point."
     );
   }
 
-  // Prepare and submit route request
+  // Prepare and submit route request.
   async function prepareRoute() {
     if (routeRequestInFlight.current) return;
 
     setRouteResult(null);
     setMessage("");
 
-    // Check that both fields are filled
     if (!start.trim() || !destination.trim()) {
       setMessage(
         "Enter both starting and destination coordinates."
@@ -300,7 +339,6 @@ export default function Home() {
       return;
     }
 
-    // Validate coordinate format and ranges
     const startPoint = parseMarsCoordinate(start);
     const destinationPoint = parseMarsCoordinate(destination);
 
@@ -318,7 +356,6 @@ export default function Home() {
       return;
     }
 
-    // Prevent identical start and destination coordinates
     if (
       startPoint.latitude === destinationPoint.latitude &&
       startPoint.longitude === destinationPoint.longitude
@@ -329,7 +366,6 @@ export default function Home() {
       return;
     }
 
-    // Check selected region
     if (!selectedRegion) {
       setMessage("Please select a valid Mars region.");
       return;
@@ -349,7 +385,6 @@ export default function Home() {
       routing_profile: "safe",
     };
 
-    // Lock before starting the asynchronous request.
     routeRequestInFlight.current = true;
     setIsLoading(true);
 
@@ -435,7 +470,6 @@ export default function Home() {
             <span className="heading-icon">▤</span>
           </div>
 
-          {/* REGION SELECTOR */}
           <div className="section-label">ACTIVE REGION</div>
 
           <div className="region-card">
@@ -645,7 +679,7 @@ export default function Home() {
             )}
           </div>
 
-          {/* DYNAMIC DATA OVERLAYS */}
+          {/* DATA OVERLAYS */}
           <div className="section-label layer-section-label">
             DATA OVERLAYS
             <span>{activeLayers} SELECTED</span>
@@ -754,13 +788,15 @@ export default function Home() {
             </div>
 
             <div className="coordinate coordinate-bottom">
-              DISPLAY: INTERACTIVE COORDINATE GRID · NO SCIENTIFIC TERRAIN DATA
+              DISPLAY: COORDINATE GRID
+              {routeResult ? " · A* ROUTE OVERLAY" : " · NO TERRAIN BASEMAP"}
             </div>
 
             <MarsMap
               selectedRegion={selectedRegion}
               resetSignal={mapResetSignal}
               onCoordinateSelect={handleMapCoordinateSelect}
+              routeCoordinates={routeMapCoordinates}
             />
 
             {/* NEXT MAP SELECTION INDICATOR */}
@@ -807,17 +843,15 @@ export default function Home() {
 
             <div className="map-center-message">
               <span className="preview-tag">
-                INTERACTIVE PREVIEW
+                {routeResult ? "ROUTE VISUALIZATION" : "INTERACTIVE PREVIEW"}
               </span>
 
-              <strong>
-                Mars coordinate workspace
-              </strong>
+              <strong>Mars coordinate workspace</strong>
 
               <span>
-                Click once to select your starting point, then click
-                again to select your destination. You can also enter
-                coordinates manually in the walk planner.
+                {routeResult
+                  ? "The green line shows the computed A* route. Green marks the start and red marks the destination."
+                  : "Click once to select your starting point, then click again to select your destination. You can also enter coordinates manually in the walk planner."}
               </span>
             </div>
 
@@ -843,14 +877,18 @@ export default function Home() {
 
             <div>
               <span>COORDINATE SYSTEM</span>
-              <strong>Preview coordinates only</strong>
+              <strong>
+                {routeResult
+                  ? "Mars geographic display"
+                  : "Preview coordinates"}
+              </strong>
             </div>
 
             <div>
               <span>ROUTE ENGINE</span>
               <strong>
                 {routeResult
-                  ? "Route response received"
+                  ? "A* route displayed"
                   : "Awaiting route request"}
               </strong>
             </div>
@@ -931,7 +969,7 @@ export default function Home() {
               <span>→</span>
             </button>
 
-            {/* DEDICATED BACKEND STATUS PANEL */}
+            {/* BACKEND STATUS */}
             <div
               className={`backend-status backend-status-${backendStatus.type}`}
               role="status"
@@ -954,14 +992,13 @@ export default function Home() {
               <p>{backendStatus.message}</p>
             </div>
 
-            {/* EXISTING MAP AND VALIDATION MESSAGES */}
             {message && (
               <div className="form-message" role="status">
                 {message}
               </div>
             )}
 
-            {/* IMPROVEMENT 5: COMPLETE ROUTE ANALYSIS */}
+            {/* ROUTE ANALYSIS */}
             {routeResult && (
               <section className="route-details">
                 <div className="route-details-header">
@@ -1081,8 +1118,8 @@ export default function Home() {
                   )}
 
                   <small>
-                    Coordinates use the AresPath display coordinate
-                    system, not latitude/longitude.
+                    Waypoints are shown in the Jezero DEM native
+                    projected coordinate reference system.
                   </small>
                 </div>
 
