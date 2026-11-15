@@ -39,13 +39,18 @@ class JezeroSlopeService:
             return
 
         if not self.dem_path.exists():
-            candidate = self.dem_path.parent.parent / "raw" / "jezero" / "jezero_ctx_dem_20m.tif"
-            if candidate.exists():
-                self.dem_path = candidate
+            from app.core.config import resolve_dem_path
+            resolved = resolve_dem_path()
+            if resolved.exists():
+                self.dem_path = resolved
             else:
-                raise SlopeDEMUnavailableError(
-                    f"Jezero DEM not found: {self.dem_path}"
-                )
+                candidate = self.dem_path.parent.parent / "data" / "jezero" / "jezero_ctx_dem_20m.tif"
+                if candidate.exists():
+                    self.dem_path = candidate
+                else:
+                    raise SlopeDEMUnavailableError(
+                        f"Jezero DEM not found: {self.dem_path}"
+                    )
 
         try:
             self._dataset = rasterio.open(self.dem_path)

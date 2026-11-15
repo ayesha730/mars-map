@@ -59,7 +59,8 @@ JEZERO_CRS_WKT = (
     'AXIS["Northing",NORTH]]'
 )
 
-REAL_DEM_PATH = Path(__file__).resolve().parents[2] / "data" / "raw" / "jezero" / "jezero_ctx_dem_20m.tif"
+from app.core.config import resolve_dem_path
+REAL_DEM_PATH = resolve_dem_path()
 
 
 # ---------------------------------------------------------------------------

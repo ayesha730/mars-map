@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
-from app.core.config import API_V1_STR, PROJECT_NAME, VERSION, JEZERO_DEM_PATH
+from app.core.config import API_V1_STR, PROJECT_NAME, VERSION, JEZERO_DEM_PATH, resolve_dem_path
 from app.models.schemas import ErrorResponse, ErrorDetail
 from app.scientific.dem.service import RegionalDEM
 from app.scientific.dem.transformer import DEMTransformer
@@ -37,9 +37,10 @@ def init_regional_dems() -> Dict[str, RegionalDEM]:
     """
     opened: Dict[str, RegionalDEM] = {}
     try:
-        # Load Jezero CTX DEM if present on disk
-        if JEZERO_DEM_PATH.exists():
-            tf = DEMTransformer.from_file(JEZERO_DEM_PATH)
+        # Load Jezero CTX DEM from resolved path across deployment environments
+        dem_path = resolve_dem_path()
+        if dem_path.exists():
+            tf = DEMTransformer.from_file(dem_path)
             opened["jezero_crater"] = RegionalDEM(region_id="jezero_crater", transformer=tf)
         return opened
     except Exception as exc:
@@ -106,16 +107,14 @@ app = FastAPI(
     ],
 )
 # ---------------------------------------------------------------------------
-# CORS — allow the local Next.js frontend to access the API
+# CORS — allow frontend clients (including Vercel deployments) to access the API
 # ---------------------------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

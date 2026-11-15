@@ -27,20 +27,9 @@ from app.scientific.dem.cost_grid import build_terrain_cost_grid
 # Configuration
 # ---------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_JEZERO_DEM_CANDIDATES = [
-    PROJECT_ROOT / "data" / "raw" / "jezero" / "jezero_ctx_dem_20m.tif",
-    PROJECT_ROOT / "data" / "jezero" / "jezero_ctx_dem_20m.tif",
-    PROJECT_ROOT / "backend" / "data" / "jezero" / "jezero_ctx_dem_20m.tif",
-]
+from app.core.config import resolve_dem_path, JEZERO_DEM_PATH
 
-def _resolve_default_dem_path() -> Path:
-    for candidate in DEFAULT_JEZERO_DEM_CANDIDATES:
-        if candidate.is_file():
-            return candidate
-    return DEFAULT_JEZERO_DEM_CANDIDATES[0]
-
-DEM_PATH = _resolve_default_dem_path()
+DEM_PATH = resolve_dem_path()
 
 MARS_RADIUS_M = 3_396_190.0
 

@@ -23,22 +23,9 @@ except ImportError:
 
 from app.models.schemas import ElevationSampleResponse
 from app.scientific.dem.transformer import DEMTransformer
+from app.core.config import resolve_dem_path, JEZERO_DEM_PATH
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-DEFAULT_JEZERO_DEM_CANDIDATES = [
-    PROJECT_ROOT / "data" / "raw" / "jezero" / "jezero_ctx_dem_20m.tif",
-    PROJECT_ROOT / "data" / "jezero" / "jezero_ctx_dem_20m.tif",
-    PROJECT_ROOT / "backend" / "data" / "jezero" / "jezero_ctx_dem_20m.tif",
-]
-
-def _resolve_default_dem_path() -> Path:
-    for candidate in DEFAULT_JEZERO_DEM_CANDIDATES:
-        if candidate.is_file():
-            return candidate
-    return DEFAULT_JEZERO_DEM_CANDIDATES[0]
-
-JEZERO_DEM_PATH = _resolve_default_dem_path()
+_resolve_default_dem_path = resolve_dem_path
 
 # Technical debt note: SUPPORTED_REGIONS currently duplicates existing endpoint
 # catalogues (_REGIONS in regions.py, REGION_REGISTRY in routes.py, _KNOWN_REGIONS in layers.py)

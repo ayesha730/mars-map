@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import io
 import math
+from pathlib import Path
 import uuid
 from typing import Dict, List, Optional
 
@@ -48,7 +49,13 @@ from rasterio.windows import bounds as window_bounds, from_bounds
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
-from app.core.config import JEZERO_ORTHO_PATH, JEZERO_DEM_PATH, MARS_IAU2015_SPHERE_RADIUS_M
+from app.core.config import (
+    JEZERO_ORTHO_PATH,
+    JEZERO_DEM_PATH,
+    MARS_IAU2015_SPHERE_RADIUS_M,
+    resolve_dem_path,
+    resolve_ortho_path,
+)
 from app.models.schemas import (
     ErrorDetail,
     ErrorResponse,
@@ -70,6 +77,20 @@ _LAYER_RASTER_PATHS = {
     "jezero_ctx_orthomosaic_6m": JEZERO_ORTHO_PATH,
     "jezero_ctx_dem_20m": JEZERO_DEM_PATH,
 }
+
+def _get_raster_path(layer_id: str) -> Optional[Path]:
+    val = _LAYER_RASTER_PATHS.get(layer_id)
+    if val is not None and str(val) not in (str(JEZERO_ORTHO_PATH), str(JEZERO_DEM_PATH)):
+        return val
+    if layer_id == "jezero_ctx_orthomosaic_6m":
+        resolved = resolve_ortho_path()
+        if resolved.exists():
+            return resolved
+    elif layer_id == "jezero_ctx_dem_20m":
+        resolved = resolve_dem_path()
+        if resolved.exists():
+            return resolved
+    return val
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +325,13 @@ async def list_layers(
             ).model_dump(),
         )
 
-    layers = _LAYER_CATALOGUE.get(norm_region_id, [])
+    raw_layers = _LAYER_CATALOGUE.get(norm_region_id, [])
+    layers = []
+    for lyr in raw_layers:
+        rp = _get_raster_path(lyr.layer_id)
+        is_avail = Path(rp).exists() if rp is not None else False
+        layers.append(lyr.model_copy(update={"available": is_avail}))
+
     verified_count = sum(1 for lyr in layers if lyr.is_verified)
     verified_available = verified_count > 0
 
@@ -374,7 +401,9 @@ async def get_layer_metadata(layer_id: str, http_request: Request = None):
             ).model_dump(),
         )
 
-    return layer
+    rp = _get_raster_path(layer_id)
+    is_avail = Path(rp).exists() if rp is not None else False
+    return layer.model_copy(update={"available": is_avail})
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +554,8 @@ async def render_layer_preview(
         )
 
     # 5. Raster dataset file presence check
-    raster_path = _LAYER_RASTER_PATHS.get(layer_id)
-    if raster_path is None or not raster_path.exists():
+    raster_path = _get_raster_path(layer_id)
+    if raster_path is None or not Path(raster_path).exists():
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=ErrorResponse(

@@ -35,6 +35,9 @@ class HealthStatus(BaseModel):
     version: str = VERSION
     body: str = "Mars"
     datum: str = "IAU:2015:49900"
+    dem_available: bool = False
+    dem_loaded: bool = False
+    dem_path: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +352,10 @@ class LayerCatalogueEntry(BaseModel):
         False,
         description="True when data is synthetic/placeholder, not real observations"
     )
+    available: bool = Field(
+        True,
+        description="True only when the underlying dataset file exists on disk."
+    )
     resolution_m_per_px: Optional[float] = Field(
         None,
         description="Ground sample distance (metres/pixel) — from verified dataset only"
@@ -388,6 +395,7 @@ class LayerMetadata(BaseModel):
     description: Optional[str] = None
     is_verified: bool = False
     is_synthetic: bool = False
+    available: bool = True
 
     # Dataset provenance
     dataset_provenance: DatasetProvenance

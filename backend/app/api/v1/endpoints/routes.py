@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import uuid
 from typing import Optional
 
@@ -157,11 +158,12 @@ async def compute_route(
 
     # Fallback if app.state DEM is not initialized but DEM file exists
     if dem_entry is None or dem_entry.transformer is None or dem_entry.transformer.is_closed:
-        from app.core.config import JEZERO_DEM_PATH
+        from app.core.config import resolve_dem_path
         from app.scientific.dem.transformer import DEMTransformer
-        if JEZERO_DEM_PATH.exists() and payload.region_id == "jezero_crater":
+        dem_path = resolve_dem_path()
+        if dem_path.exists() and payload.region_id == "jezero_crater":
             try:
-                tf = DEMTransformer.from_file(JEZERO_DEM_PATH)
+                tf = DEMTransformer.from_file(dem_path)
                 dem_entry = RegionalDEM(payload.region_id, tf)
             except Exception:
                 dem_entry = None
@@ -185,9 +187,19 @@ async def compute_route(
             # Client selection is respected if provided in the payload; otherwise canonical default is used.
             coord_space = getattr(payload, "coordinate_space", None) or "arespath_display_v1"
 
+            # Waypoint downsampling: protect Render's 512MB RAM and frontend network payload
+            # by capping dense polyline points (preserving exact start and goal).
+            raw_points = res.waypoints_display
+            MAX_DISPLAY_WAYPOINTS = 1000
+            if len(raw_points) > MAX_DISPLAY_WAYPOINTS:
+                step = math.ceil(len(raw_points) / MAX_DISPLAY_WAYPOINTS)
+                points_to_return = [raw_points[0]] + raw_points[1:-1:step] + [raw_points[-1]]
+            else:
+                points_to_return = raw_points
+
             route_geometry = RouteGeometry(
                 coordinate_space=coord_space,
-                points=res.waypoints_display,
+                points=points_to_return,
             )
 
             terrain_summary = TerrainSummary(
