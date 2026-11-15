@@ -13,6 +13,7 @@ import uuid
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import API_V1_STR, PROJECT_NAME, VERSION
@@ -44,7 +45,20 @@ app = FastAPI(
         {"name": "Layers",  "description": "Terrain and map layer catalogue and metadata"},
     ],
 )
+# ---------------------------------------------------------------------------
+# CORS — allow the local Next.js frontend to access the API
+# ---------------------------------------------------------------------------
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # ---------------------------------------------------------------------------
 # Global exception handlers — PRD standard error envelope
 # ---------------------------------------------------------------------------
